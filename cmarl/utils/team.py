@@ -15,6 +15,15 @@ class TeamManager:
         """
         return list(self.teams.keys())
 
+    def get_team_agents(self, team: str) -> list[str]:
+        """
+        Get the agents in a team.
+        :param team: the team name
+        :return: a list of agent names in the team
+        """
+        assert team in self.teams, f"Team [{team}] not found."
+        return self.teams[team]
+
     def group_agents(self) -> dict[str, list[str]]:
         """
         Group agents by their team.
@@ -56,3 +65,11 @@ class TeamManager:
         :return:
         """
         self.terminated_agents.add(agent)
+
+    def has_terminated_teams(self) -> bool:
+        """
+        Check if any team is terminated.
+        """
+        for team in self.teams:
+            if self.is_team_terminated(team):
+                return True
