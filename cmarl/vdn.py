@@ -8,6 +8,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from functools import reduce
+import gymnasium as gym
+import pettingzoo
 
 USE_WANDB = True  # if enabled, logs data on wandb server
 
@@ -20,15 +23,28 @@ class ReplayBuffer:
     def __init__(self, buffer_limit):
         self.buffer = collections.deque(maxlen=buffer_limit)
 
-    def put(self, transition):
+    def put(self, transition: tuple):
+        """Update buffer with a new transition
+        :param transition: tuple of (state, action, reward, next_state, done)
+        """
         self.buffer.append(transition)
 
-    def sample_chunk(self, batch_size, chunk_size):
+    def sample_chunk(self, batch_size, chunk_size) -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor):
+        """Sample a batch of chunk_size transitions from the buffer
+        :return: tuple of (states, actions, rewards, next_states, dones),
+        their shapes are respectively:
+        [batch_size, chunk_size, n_agents, obs_size],
+        [batch_size, chunk_size, n_agents],
+        [batch_size, chunk_size, n_agents],
+        [batch_size, chunk_size, n_agents, obs_size],
+        [batch_size, chunk_size, 1]
+        """
         start_idx = np.random.randint(0, len(self.buffer) - chunk_size, batch_size)
         s_lst, a_lst, r_lst, s_prime_lst, done_lst = [], [], [], [], []
 
         for idx in start_idx:
             for chunk_step in range(idx, idx + chunk_size):
+                # state, action, reward, next_state, done
                 s, a, r, s_prime, done = self.buffer[chunk_step]
                 s_lst.append(s)
                 a_lst.append(a)
@@ -48,66 +64,99 @@ class ReplayBuffer:
 
 
 class QNet(nn.Module):
-    def __init__(self, observation_space, action_space, recurrent=False):
+    def __init__(self, agents: list[str], observation_spaces: dict[str, gym.spaces.Box], action_spaces: dict[str, gym.spaces.Discrete], recurrent=False):
         super(QNet, self).__init__()
-        self.num_agents = len(observation_space)
+        self.agents = agents
+        self.num_agents = len(observation_spaces)
         self.recurrent = recurrent
-        self.hx_size = 32
-        for agent_i in range(self.num_agents):
-            n_obs = observation_space[agent_i].shape[0]
-            setattr(self, 'agent_feature_{}'.format(agent_i), nn.Sequential(nn.Linear(n_obs, 64),
-                                                                            nn.ReLU(),
-                                                                            nn.Linear(64, self.hx_size),
-                                                                            nn.ReLU()))
+        self.hx_size = 32   # latent repr size
+        self.n_obs_map = {agent: reduce((lambda x, y: x * y), observation_spaces[agent].shape) for agent in agents}  # observation space flatten size of agents
+        self.n_act_map = {agent: action_spaces[agent].n for agent in agents}  # action space size of agents
+
+        for agent_i in agents:
+            # flatten magent env observation space
+            n_obs = self.n_obs_map[agent_i]
+            setattr(
+                self, 'agent_feature_{}'.format(agent_i),   # shape: n_obs, hx_size
+                nn.Sequential(
+                    nn.Linear(n_obs, 64),
+                    nn.ReLU(),
+                    nn.Linear(64, self.hx_size),
+                    nn.ReLU()
+                )
+            )
             if recurrent:
-                setattr(self, 'agent_gru_{}'.format(agent_i), nn.GRUCell(self.hx_size, self.hx_size))
-            setattr(self, 'agent_q_{}'.format(agent_i), nn.Linear(self.hx_size, action_space[agent_i].n))
+                setattr(
+                    self, 'agent_gru_{}'.format(agent_i),   # shape: hx_size, hx_size
+                    nn.GRUCell(self.hx_size, self.hx_size)
+                )
+            setattr(
+                self, 'agent_q_{}'.format(agent_i),     # shape: hx_size, n_actions
+                nn.Linear(self.hx_size, self.n_act_map[agent_i])
+            )
 
-    def forward(self, obs: torch.Tensor, hidden) -> (torch.Tensor, torch.Tensor):
-        q_values = [torch.empty(obs.shape[0], )] * self.num_agents
-        next_hidden = [torch.empty(obs.shape[0], 1, self.hx_size)] * self.num_agents
-        for agent_i in range(self.num_agents):
-            x = getattr(self, 'agent_feature_{}'.format(agent_i))(obs[:, agent_i, :])
+    def forward(self, obs: torch.Tensor, hidden: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+        """Predict q values for each agent's actions in the batch
+        :param obs: [batch_size, num_agents, n_obs]
+        :param hidden: [batch_size, num_agents, hx_size]
+        :return: q_values: [batch_size, num_agents, n_actions], hidden: [batch_size, num_agents, hx_size]
+        """
+        batch_size = obs.shape[0]
+        # TODO: we may have changing num_agents
+        q_values = [torch.empty(batch_size, )] * self.num_agents  # [len=num_agents, (batch_size)]
+        next_hidden = [torch.empty(batch_size, 1, self.hx_size)] * self.num_agents  # [len=num_agents, (batch_size, 1, hx_size)]
+
+        for i, agent_i in enumerate(self.agents):
+            x = getattr(self, 'agent_feature_{}'.format(agent_i))(obs[:, i, :]) # [batch_size, n_obs] -> [batch_size, hx_size]
             if self.recurrent:
-                x = getattr(self, 'agent_gru_{}'.format(agent_i))(x, hidden[:, agent_i, :])
-                next_hidden[agent_i] = x.unsqueeze(1)
-            q_values[agent_i] = getattr(self, 'agent_q_{}'.format(agent_i))(x).unsqueeze(1)
-
+                x = getattr(self, 'agent_gru_{}'.format(agent_i))(x, hidden[:, i, :])   # [batch_size, hx_size]
+                next_hidden[i] = x.unsqueeze(1)  # [batch_size, 1, hx_size]
+            q_values[i] = getattr(self, 'agent_q_{}'.format(agent_i))(x).unsqueeze(1)   # [batch_size, 1, n_actions]
+        # q_values: [num_agents, (batch_size, 1, n_actions)]
         return torch.cat(q_values, dim=1), torch.cat(next_hidden, dim=1)
 
-    def sample_action(self, obs, hidden, epsilon=1e3) -> (torch.Tensor, torch.Tensor):
-        out, hidden = self.forward(obs, hidden)
-        mask = (torch.rand((out.shape[0],)) <= epsilon)
-        action = torch.empty((out.shape[0], out.shape[1],))
-        action[mask] = torch.randint(0, out.shape[2], action[mask].shape).float()
-        action[~mask] = out[~mask].argmax(dim=2).float()
-        return action, hidden
+    def sample_action(self, obs: torch.Tensor, hidden: torch.Tensor, epsilon=1e3) -> (torch.Tensor, torch.Tensor):
+        """Choose action with epsilon-greedy policy, for each agent in the batch
+        :param obs: a batch of observations, [batch_size, num_agents, n_obs]
+        :param hidden: a batch of hidden states, [batch_size, num_agents, hx_size]
+        :param epsilon: exploration rate
+        :return: actions: [batch_size, num_agents], hidden: [batch_size, num_agents, hx_size]
+        """
+        q_values, hidden = self.forward(obs, hidden)    # [batch_size, num_agents, n_actions], [batch_size, num_agents, hx_size]
+        # epsilon-greedy action selection
+        mask = (torch.rand((q_values.shape[0],)) <= epsilon)     # [batch_size]
+        actions = torch.empty((q_values.shape[0], q_values.shape[1],))     # [batch_size, num_agents]
+        actions[mask] = torch.randint(0, q_values.shape[2], actions[mask].shape).float()
+        actions[~mask] = q_values[~mask].argmax(dim=2).float()  # choose action with max q value
+        return actions, hidden   # [batch_size, num_agents], [batch_size, num_agents, hx_size]
 
     def init_hidden(self, batch_size=1):
         return torch.zeros((batch_size, self.num_agents, self.hx_size))
 
 
 def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimizer, gamma: float, batch_size: int, update_iter=10, chunk_size=10, grad_clip_norm=5):
-    _chunk_size = chunk_size if q.recurrent else 1
+    chunk_size = chunk_size if q.recurrent else 1
     for _ in range(update_iter):
-        s, a, r, s_prime, done = memory.sample_chunk(batch_size, _chunk_size)
+        # Get data from buffer
+        states, actions, rewards, next_states, dones = memory.sample_chunk(batch_size, chunk_size)
 
         hidden = q.init_hidden(batch_size)
         target_hidden = q_target.init_hidden(batch_size)
         loss = 0
-        for step_i in range(_chunk_size):
-            q_out, hidden = q(s[:, step_i, :, :], hidden)
-            q_a = q_out.gather(2, a[:, step_i, :].unsqueeze(-1).long()).squeeze(-1)
-            sum_q = q_a.sum(dim=1, keepdims=True)
+        for step_i in range(chunk_size):
+            out: tuple[torch.Tensor, torch.Tensor] = q(states[:, step_i, :, :], hidden)  # [batch_size, num_agents, n_actions]
+            q_out, hidden = out
+            q_a = q_out.gather(2, actions[:, step_i, :].unsqueeze(-1).long()).squeeze(-1)   # [batch_size, num_agents]: q values of actions taken
+            sum_q = q_a.sum(dim=1, keepdims=True)   # [batch_size, 1]
 
-            max_q_prime, target_hidden = q_target(s_prime[:, step_i, :, :], target_hidden.detach())
+            max_q_prime, target_hidden = q_target(next_states[:, step_i, :, :], target_hidden.detach())
             max_q_prime = max_q_prime.max(dim=2)[0].squeeze(-1)
-            target_q = r[:, step_i, :].sum(dim=1, keepdims=True)
-            target_q += gamma * max_q_prime.sum(dim=1, keepdims=True) * (1 - done[:, step_i])
+            target_q = rewards[:, step_i, :].sum(dim=1, keepdims=True)  # [batch_size, 1]
+            target_q += gamma * max_q_prime.sum(dim=1, keepdims=True) * (1 - dones[:, step_i])
 
             loss += F.smooth_l1_loss(sum_q, target_q.detach())
 
-            done_mask = done[:, step_i].squeeze(-1).bool()
+            done_mask = dones[:, step_i].squeeze(-1).bool()
             hidden[done_mask] = q.init_hidden(len(hidden[done_mask]))
             target_hidden[done_mask] = q_target.init_hidden(len(target_hidden[done_mask]))
 
@@ -117,11 +166,11 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
         optimizer.step()
 
 
-def test(env, num_episodes: int, q: QNet):
+def test(env: pettingzoo.ParallelEnv, num_episodes: int, q: QNet):
     score = 0
     for episode_i in range(num_episodes):
-        state = env.reset()
-        done = [False for _ in range(env.n_agents)]
+        env.reset()
+        done = [False for _ in range(env.num_agents)]
         with torch.no_grad():
             hidden = q.init_hidden()
             while not all(done):
