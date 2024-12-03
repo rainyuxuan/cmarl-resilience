@@ -15,7 +15,7 @@ import pettingzoo
 
 from cmarl.utils.team import TeamManager
 
-USE_WANDB = True  # if enabled, logs data on wandb server
+USE_WANDB = False  # if enabled, logs data on wandb server
 
 @dataclass
 class VdnHyperparameters:
@@ -34,6 +34,8 @@ class ReplayBuffer:
 
     def sample_chunk(self, batch_size, chunk_size) -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor):
         """Sample a batch of chunk_size transitions from the buffer
+        :param batch_size: number of transitions to sample
+        :param chunk_size: length of horizon of each batch
         :return: tuple of (states, actions, rewards, next_states, dones),
         their shapes are respectively:
         [batch_size, chunk_size, n_agents, obs_size],
@@ -67,7 +69,7 @@ class ReplayBuffer:
 
 
 class QNet(nn.Module):
-    def __init__(self, agents: list[str], observation_spaces: dict[str, gym.spaces.Box], action_spaces: dict[str, gym.spaces.Discrete], recurrent=False):
+    def __init__(self, agents: list[str], observation_spaces: dict[str, gym.spaces.Space], action_spaces: dict[str, gym.spaces.Space], recurrent=False):
         super(QNet, self).__init__()
         self.agents = agents
         self.num_agents = len(observation_spaces)
@@ -161,6 +163,7 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
 
             loss += F.smooth_l1_loss(sum_q, target_q.detach())
 
+            # FIXME: may have error with dones
             done_mask = dones[:, step_i].squeeze(-1).bool()
             hidden[done_mask] = q.init_hidden(len(hidden[done_mask]))
             target_hidden[done_mask] = q_target.init_hidden(len(target_hidden[done_mask]))
@@ -170,6 +173,66 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
         torch.nn.utils.clip_grad_norm_(q.parameters(), grad_clip_norm, norm_type=2)
         optimizer.step()
 
+
+def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuffer] = None, epsilon=0.1) -> float:
+    """Run an episode in the environment
+    :return: total score of the episode
+    """
+    def flatten_observation(observations: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        return {agent: obs.flatten() for agent, obs in observations.items()}
+
+    observations: dict[str, np.ndarray] = env.reset()
+    team_manager = TeamManager(env.agents)
+    teams = team_manager.get_teams()
+    my_team = teams[0]
+    hidden = q.init_hidden()
+    score = 0.0
+    flatten_observations = flatten_observation(observations)
+
+    while not team_manager.has_terminated_teams():
+        my_team_observations = team_manager.get_info_of_team(my_team, flatten_observations)
+        # Get actions for each agent based on the team
+        agent_actions: dict[str, Optional[int]] = {}  # {agent: action}
+        for team in teams:
+            if team == my_team:
+                team_observations = my_team_observations
+                obs = torch.Tensor([team_observations[agent] for agent in team_observations.keys()]).unsqueeze(0)
+                # team_hidden = team_manager.get_info_of_team(team, hidden) TODO: we need a mapping from agent to index
+                actions, team_hiddens = q.sample_action(obs, hidden, epsilon)
+                team_actions = {agent: action for agent, action in
+                                zip(team_observations.keys(), actions.squeeze(0).data.cpu().numpy().tolist())}
+            else:
+                # TODO: selfplay
+                # Opponents choose random actions
+                team_actions = {agent: env.action_space(agent).sample() for agent in team_manager.get_team_agents(team)}
+            agent_actions.update(team_actions)
+
+        # Terminated agents use None action
+        for agent in team_manager.terminated_agents:
+            agent_actions[agent] = None
+
+        # Step the environment
+        observations, agent_rewards, agent_terminations, agent_truncations, agent_infos = env.step(agent_actions)
+        score += sum(team_manager.get_info_of_team(my_team, agent_rewards).values())
+        flatten_observations = flatten_observation(observations)
+
+        if memory is not None:
+            memory.put((
+                list(my_team_observations.values()),
+                list(team_manager.get_info_of_team(my_team, agent_actions).values()),
+                list(team_manager.get_info_of_team(my_team, agent_rewards).values()),
+                list(team_manager.get_info_of_team(my_team, flatten_observations).values()),
+                [int(team_manager.has_terminated_teams())]
+            ))
+
+        # Check for termination
+        for agent, done in agent_terminations.items():
+            if done:
+                team_manager.terminate_agent(agent)
+        for agent, done in agent_truncations.items():
+            if done:
+                team_manager.terminate_agent(agent)
+    return score
 
 def test(env: pettingzoo.ParallelEnv, num_episodes: int, q: QNet):
     """
@@ -181,76 +244,30 @@ def test(env: pettingzoo.ParallelEnv, num_episodes: int, q: QNet):
     q.eval()
     score = 0
     for episode_i in range(num_episodes):
-        observations: dict[str, np.ndarray] = env.reset()
-        team_manager = TeamManager(env.agents)
-        teams = team_manager.get_teams()
-        my_team = teams[0]
-        hidden = q.init_hidden()
-
-        while not team_manager.has_terminated_teams():
-            flatten_observations = {agent: obs.flatten() for agent, obs in observations.items()}
-            # Get actions for each agent based on the team
-            agent_actions: dict[str, Optional[int]] = {}    # {agent: action}
-            for team in teams:
-                if team == my_team:
-                    team_observations = team_manager.get_info_of_team(team, flatten_observations)
-                    obs = torch.Tensor([team_observations[agent] for agent in team_observations.keys()]).unsqueeze(0)
-                    # team_hidden = team_manager.get_info_of_team(team, hidden) TODO: we need a mapping from agent to index
-                    actions, team_hiddens = q.sample_action(obs, hidden, epsilon=0)
-                    team_actions = {agent: action for agent, action in zip(team_observations.keys(), actions.squeeze(0).data.cpu().numpy().tolist())}
-                else:
-                    # TODO: selfplay
-                    # Opponents choose random actions
-                    team_actions = {agent: env.action_space(agent).sample() for agent in team_manager.get_team_agents(team)}
-                agent_actions.update(team_actions)
-
-            # Terminated agents use None action
-            for agent in team_manager.terminated_agents:
-                agent_actions[agent] = None
-
-            # Step the environment
-            observations, agent_rewards, agent_terminations, agent_truncations, agent_infos = env.step(agent_actions)
-            score += sum(team_manager.get_info_of_team(my_team, agent_rewards).values())
-
-            # Check for termination
-            for agent, done in agent_terminations.items():
-                if done:
-                    team_manager.terminate_agent(agent)
-            for agent, done in agent_truncations.items():
-                if done:
-                    team_manager.terminate_agent(agent)
+        score += run_episode(env, q)
     return score / num_episodes
 
 
 def main(
-        env, test_env,
+        env: pettingzoo.ParallelEnv, test_env: pettingzoo.ParallelEnv,
         lr, gamma, batch_size, buffer_limit, log_interval, max_episodes, max_epsilon, min_epsilon,
-        test_episodes, warm_up_steps, update_iter, chunk_size, update_target_interval, recurrent
+        test_episodes, warm_up_steps, update_iter, chunk_size, update_target_interval, recurrent: bool = False
 ):
 
     # create env.
     memory = ReplayBuffer(buffer_limit)
 
     # create networks
-    q = QNet(env.observation_spaces, env.action_spaces, recurrent)
-    q_target = QNet(env.observation_spaces, env.action_spaces, recurrent)
+    q = QNet(env.agents, env.observation_spaces, env.action_spaces, recurrent)
+    q_target = QNet(env.agents, env.observation_spaces, env.action_spaces, recurrent)
     q_target.load_state_dict(q.state_dict())
     optimizer = optim.Adam(q.parameters(), lr=lr)
 
     score = 0
     for episode_i in range(max_episodes):
         epsilon = max(min_epsilon, max_epsilon - (max_epsilon - min_epsilon) * (episode_i / (0.6 * max_episodes)))
-        state = env.reset()
-        done = [False for _ in range(env.n_agents)]
         with torch.no_grad():
-            hidden = q.init_hidden()
-            while not all(done):
-                action, hidden = q.sample_action(torch.Tensor(state).unsqueeze(0), hidden, epsilon)
-                action = action[0].data.cpu().numpy().tolist()
-                next_state, reward, done, info = env.step(action)
-                memory.put((state, action, (np.array(reward)).tolist(), next_state, [int(all(done))]))
-                score += sum(reward)
-                state = next_state
+            score += run_episode(env, q, memory, epsilon)
 
         if memory.size() > warm_up_steps:
             train(q, q_target, memory, optimizer, gamma, batch_size, update_iter, chunk_size)
@@ -283,7 +300,8 @@ if __name__ == '__main__':
     # Process arguments
     args = parser.parse_args()
 
-    kwargs = {'env_name': args.env_name,
+    kwargs = {'env': battle_v4.env(map_size=20, render_mode='human', max_cycles=10000),
+              'test_env': battle_v4.env(map_size=20, render_mode='human', max_cycles=10000),
               'lr': 0.001,
               'batch_size': 32,
               'gamma': 0.99,
