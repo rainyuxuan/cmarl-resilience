@@ -1,3 +1,5 @@
+import collections
+
 
 class TeamManager:
 
@@ -6,19 +8,23 @@ class TeamManager:
         self.teams = self.group_agents()
         self.terminated_agents = set()
 
+    def get_teams(self) -> list[str]:
+        """
+        Get the team names.
+        :return: a list of team names
+        """
+        return list(self.teams.keys())
+
     def group_agents(self) -> dict[str, list[str]]:
         """
         Group agents by their team.
         :param agents: a list of agent names in the format of teamname_agentid
         :return: a dictionary with team names as keys and a list of agent names as values
         """
-        teams = {}
+        teams = collections.defaultdict(list)
         for agent in self.agents:
             team, _ = agent.split('_')
-            if team in teams:
-                teams[team].append(agent)
-            else:
-                teams[team] = [agent]
+            teams[team].append(agent)
         return teams
 
     def reset(self):
