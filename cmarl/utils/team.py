@@ -27,6 +27,16 @@ class TeamManager:
             teams[team].append(agent)
         return teams
 
+    def get_info_of_team(self, team: str, data: dict[str, any]) -> dict[str, any]:
+        """
+        Get the information of a team.
+        :param team: the team name
+        :param data: the data to get information from
+        :return: a dictionary with the team name as key and the information as value
+        """
+        assert team in self.teams, f"Team [{team}] not found."
+        return {agent: data[agent] for agent in self.teams[team]}
+
     def reset(self):
         self.terminated_agents = set()
 
