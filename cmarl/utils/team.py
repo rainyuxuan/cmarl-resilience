@@ -36,7 +36,7 @@ class TeamManager:
             teams[team].append(agent)
         return teams
 
-    def get_info_of_team(self, team: str, data: dict[str, any]) -> dict[str, any]:
+    def get_info_of_team(self, team: str, data: dict[str, any], default=None) -> dict[str, any]:
         """
         Get the information of a team.
         :param team: the team name
@@ -44,8 +44,15 @@ class TeamManager:
         :return: a dictionary with the team name as key and the information as value
         """
         assert team in self.teams, f"Team [{team}] not found."
-        return {agent: data[agent] for agent in self.teams[team]}
+        result = {}
+        for agent in self.get_team_agents(team):
+            if agent not in data:
+                result[agent] = default
+            else:
+                result[agent] = data[agent]
 
+        return result
+    
     def reset(self):
         self.terminated_agents = set()
 
@@ -73,3 +80,4 @@ class TeamManager:
         for team in self.teams:
             if self.is_team_terminated(team):
                 return True
+        return False

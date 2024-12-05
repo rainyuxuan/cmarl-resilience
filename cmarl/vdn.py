@@ -14,7 +14,7 @@ import gymnasium as gym
 import pettingzoo
 from tqdm import tqdm
 
-from cmarl.utils.team import TeamManager
+from utils.team import TeamManager
 
 USE_WANDB = False  # if enabled, logs data on wandb server
 
@@ -73,7 +73,7 @@ class QNet(nn.Module):
     def __init__(self, agents: list[str], observation_spaces: dict[str, gym.spaces.Space], action_spaces: dict[str, gym.spaces.Space], recurrent=False):
         super(QNet, self).__init__()
         self.agents = agents
-        self.num_agents = len(observation_spaces)
+        self.num_agents = len(agents)
         self.recurrent = recurrent
         self.hx_size = 32   # latent repr size
         self.n_obs_map = {agent: reduce((lambda x, y: x * y), observation_spaces[agent].shape) for agent in agents}  # observation space flatten size of agents
@@ -115,6 +115,9 @@ class QNet(nn.Module):
         next_hidden = [torch.empty(batch_size, 1, self.hx_size)] * self.num_agents  # [len=num_agents, (batch_size, 1, hx_size)]
 
         for i, agent_i in enumerate(self.agents):
+            if obs[:, i, :].count_nonzero() == 0:
+                q_values[i] = torch.zeros(batch_size, 1, self.n_act_map[agent_i])
+                continue
             x = getattr(self, 'agent_feature_{}'.format(agent_i))(obs[:, i, :]) # [batch_size, n_obs] -> [batch_size, hx_size]
             if self.recurrent:
                 x = getattr(self, 'agent_gru_{}'.format(agent_i))(x, hidden[:, i, :])   # [batch_size, hx_size]
@@ -194,16 +197,23 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
 
     while not team_manager.has_terminated_teams():
         my_team_observations = team_manager.get_info_of_team(my_team, flatten_observations)
+        for agent in my_team_observations.keys():
+            if my_team_observations[agent] is None:
+                my_team_observations[agent] = torch.zeros(q.n_obs_map[agent])
         # Get actions for each agent based on the team
         agent_actions: dict[str, Optional[int]] = {}  # {agent: action}
         for team in teams:
             if team == my_team:
                 # TODO: Fill rows with zeros for terminated agents
-                team_observations = my_team_observations
+                team_observations = torch.tensor([my_team_observations[agent] for agent in team_manager.get_team_agents(team)]).unsqueeze(0)
                 # team_hidden = team_manager.get_info_of_team(team, hidden) TODO: we need a mapping from agent to index
                 actions, team_hiddens = q.sample_action(team_observations, hidden, epsilon)
-                team_actions = {agent: action for agent, action in
-                                zip(team_observations.keys(), actions.squeeze(0).data.cpu().numpy().tolist())}
+                team_actions = {
+                    agent: action
+                    for agent, action in zip(
+                        my_team_observations.keys(), actions.squeeze(0).data.numpy().tolist()
+                    )
+                }
             else:
                 # TODO: selfplay
                 # Opponents choose random actions
@@ -216,14 +226,14 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
 
         # Step the environment
         observations, agent_rewards, agent_terminations, agent_truncations, agent_infos = env.step(agent_actions)
-        score += sum(team_manager.get_info_of_team(my_team, agent_rewards).values())
+        score += sum(team_manager.get_info_of_team(my_team, agent_rewards, 0).values())
         flatten_observations = flatten_observation(observations)
 
         if memory is not None:
             memory.put((
                 list(my_team_observations.values()),
                 list(team_manager.get_info_of_team(my_team, agent_actions).values()),
-                list(team_manager.get_info_of_team(my_team, agent_rewards).values()),
+                list(team_manager.get_info_of_team(my_team, agent_rewards, 0).values()),
                 list(team_manager.get_info_of_team(my_team, flatten_observations).values()),
                 [int(team_manager.has_terminated_teams())]
             ))
@@ -271,7 +281,7 @@ def main(
     optimizer = optim.Adam(q.parameters(), lr=lr)
 
     score = 0
-    for episode_i in range(max_episodes):
+    for episode_i in tqdm(range(max_episodes)):
         epsilon = max(min_epsilon, max_epsilon - (max_epsilon - min_epsilon) * (episode_i / (0.6 * max_episodes)))
         with torch.no_grad():
             score += run_episode(env, q, memory, epsilon)
@@ -287,9 +297,6 @@ def main(
             train_score = score / log_interval
             print("#{:<10}/{} episodes , avg train score : {:.1f}, test score: {:.1f} n_buffer : {}, eps : {:.1f}"
                   .format(episode_i, max_episodes, train_score, test_score, memory.size(), epsilon))
-            if USE_WANDB:
-                wandb.log({'episode': episode_i, 'test-score': test_score, 'buffer-size': memory.size(),
-                           'epsilon': epsilon, 'train-score': train_score})
             score = 0
 
     env.close()
@@ -302,31 +309,32 @@ if __name__ == '__main__':
     parser.add_argument('--env-name', required=False, default='ma_gym:Checkers-v0')
     parser.add_argument('--seed', type=int, default=42, required=False)
     parser.add_argument('--no-recurrent', action='store_true')
-    parser.add_argument('--max-episodes', type=int, default=15000, required=False)
+    parser.add_argument('--max-episodes', type=int, default=150, required=False)
 
     # Process arguments
     args = parser.parse_args()
 
-    kwargs = {'env': battle_v4.parallel_env(map_size=20, render_mode='human', max_cycles=10000),
-              'test_env': battle_v4.parallel_env(map_size=20, render_mode='human', max_cycles=10000),
-              'lr': 0.001,
-              'batch_size': 32,
-              'gamma': 0.99,
-              'buffer_limit': 50000,
-              'update_target_interval': 20,
-              'log_interval': 100,
-              'max_episodes': args.max_episodes,
-              'max_epsilon': 0.9,
-              'min_epsilon': 0.1,
-              'test_episodes': 5,
-              'warm_up_steps': 2000,
-              'update_iter': 10,
-              'chunk_size': 10,  # if not recurrent, internally, we use chunk_size of 1 and no gru cell is used.
-              'recurrent': not args.no_recurrent}
-
-    if USE_WANDB:
-        import wandb
-
-        wandb.init(project='minimal-marl', config={'algo': 'vdn', **kwargs})
+    kwargs = {
+        "env": battle_v4.parallel_env(
+            map_size=20, render_mode="human", max_cycles=5000, step_reward=0, attack_penalty=0.01
+        ),
+        "test_env": battle_v4.parallel_env(
+            map_size=20, render_mode="human", max_cycles=5000, step_reward=0, attack_penalty=0.01
+        ),
+        "lr": 0.001,
+        "batch_size": 32,
+        "gamma": 0.99,
+        "buffer_limit": 5000,
+        "update_target_interval": 20,
+        "log_interval": 100,
+        "max_episodes": args.max_episodes,
+        "max_epsilon": 0.9,
+        "min_epsilon": 0.1,
+        "test_episodes": 5,
+        "warm_up_steps": 20,
+        "update_iter": 10,
+        "chunk_size": 10,  # if not recurrent, internally, we use chunk_size of 1 and no gru cell is used.
+        "recurrent": False,
+    }
 
     main(**kwargs)
