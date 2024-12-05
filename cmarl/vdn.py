@@ -12,6 +12,7 @@ import torch.optim as optim
 from functools import reduce
 import gymnasium as gym
 import pettingzoo
+from tqdm import tqdm
 
 from cmarl.utils.team import TeamManager
 
@@ -77,10 +78,12 @@ class QNet(nn.Module):
         self.hx_size = 32   # latent repr size
         self.n_obs_map = {agent: reduce((lambda x, y: x * y), observation_spaces[agent].shape) for agent in agents}  # observation space flatten size of agents
         self.n_act_map = {agent: action_spaces[agent].n for agent in agents}  # action space size of agents
+        self.idx_map = {agent: i for i, agent in enumerate(agents)}
 
         for agent_i in agents:
             # flatten magent env observation space
             n_obs = self.n_obs_map[agent_i]
+            idx = self.idx_map[agent_i]
             setattr(
                 self, 'agent_feature_{}'.format(agent_i),   # shape: n_obs, hx_size
                 nn.Sequential(
@@ -195,10 +198,10 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
         agent_actions: dict[str, Optional[int]] = {}  # {agent: action}
         for team in teams:
             if team == my_team:
+                # TODO: Fill rows with zeros for terminated agents
                 team_observations = my_team_observations
-                obs = torch.Tensor([team_observations[agent] for agent in team_observations.keys()]).unsqueeze(0)
                 # team_hidden = team_manager.get_info_of_team(team, hidden) TODO: we need a mapping from agent to index
-                actions, team_hiddens = q.sample_action(obs, hidden, epsilon)
+                actions, team_hiddens = q.sample_action(team_observations, hidden, epsilon)
                 team_actions = {agent: action for agent, action in
                                 zip(team_observations.keys(), actions.squeeze(0).data.cpu().numpy().tolist())}
             else:
@@ -253,13 +256,17 @@ def main(
         lr, gamma, batch_size, buffer_limit, log_interval, max_episodes, max_epsilon, min_epsilon,
         test_episodes, warm_up_steps, update_iter, chunk_size, update_target_interval, recurrent: bool = False
 ):
-
     # create env.
     memory = ReplayBuffer(buffer_limit)
 
+    # Setup env
+    env.reset()
+    team_manager = TeamManager(env.agents)
+    my_team = team_manager.get_teams()[0]
+
     # create networks
-    q = QNet(env.agents, env.observation_spaces, env.action_spaces, recurrent)
-    q_target = QNet(env.agents, env.observation_spaces, env.action_spaces, recurrent)
+    q = QNet(team_manager.get_team_agents(my_team), env.observation_spaces, env.action_spaces, recurrent)
+    q_target = QNet(team_manager.get_team_agents(my_team), env.observation_spaces, env.action_spaces, recurrent)
     q_target.load_state_dict(q.state_dict())
     optimizer = optim.Adam(q.parameters(), lr=lr)
 
@@ -293,15 +300,15 @@ if __name__ == '__main__':
     # Lets gather arguments
     parser = argparse.ArgumentParser(description='Value Decomposition Network (VDN)')
     parser.add_argument('--env-name', required=False, default='ma_gym:Checkers-v0')
-    parser.add_argument('--seed', type=int, default=1, required=False)
+    parser.add_argument('--seed', type=int, default=42, required=False)
     parser.add_argument('--no-recurrent', action='store_true')
     parser.add_argument('--max-episodes', type=int, default=15000, required=False)
 
     # Process arguments
     args = parser.parse_args()
 
-    kwargs = {'env': battle_v4.env(map_size=20, render_mode='human', max_cycles=10000),
-              'test_env': battle_v4.env(map_size=20, render_mode='human', max_cycles=10000),
+    kwargs = {'env': battle_v4.parallel_env(map_size=20, render_mode='human', max_cycles=10000),
+              'test_env': battle_v4.parallel_env(map_size=20, render_mode='human', max_cycles=10000),
               'lr': 0.001,
               'batch_size': 32,
               'gamma': 0.99,

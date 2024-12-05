@@ -41,11 +41,4 @@ conda remove --name cmarl --all
   booktitle={Thirty-Second AAAI Conference on Artificial Intelligence},
   year={2018}
 }
-
-@article{hu2022marllib,
-  author  = {Siyi Hu and Yifan Zhong and Minquan Gao and Weixun Wang and Hao Dong and Xiaodan Liang and Zhihui Li and Xiaojun Chang and Yaodong Yang},
-  title   = {MARLlib: A Scalable and Efficient Multi-agent Reinforcement Learning Library},
-  journal = {Journal of Machine Learning Research},
-  year    = {2023},
-}
 ```
