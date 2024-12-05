@@ -1,6 +1,7 @@
 import argparse
 import collections
-from typing import Optional
+from collections import defaultdict
+from typing import Optional, Tuple
 
 from magent2.environments import battle_v4
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ import gymnasium as gym
 import pettingzoo
 from tqdm import tqdm
 
-from utils.team import TeamManager
+from cmarl.utils.team import TeamManager
 
 USE_WANDB = False  # if enabled, logs data on wandb server
 
@@ -27,43 +28,54 @@ class ReplayBuffer:
     def __init__(self, buffer_limit):
         self.buffer = collections.deque(maxlen=buffer_limit)
 
-    def put(self, transition: tuple):
-        """Update buffer with a new transition
+    def put(self, transition: list[dict[str, any]]):
+        """Update buffer with a new transition step
         :param transition: tuple of (state, action, reward, next_state, done)
         """
         self.buffer.append(transition)
 
-    def sample_chunk(self, batch_size, chunk_size) -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor):
+    def sample_chunk(self, batch_size: int, chunk_size: int, agents: list[str]) -> dict[str, any]:
         """Sample a batch of chunk_size transitions from the buffer
-        :param batch_size: number of transitions to sample
-        :param chunk_size: length of horizon of each batch
-        :return: tuple of (states, actions, rewards, next_states, dones),
+        :param batch_size: max number of batches to sample
+        :param chunk_size: max length of horizon of each batch
+        :return: dict of (states, actions, rewards, next_states, dones),
         their shapes are respectively:
-        [batch_size, chunk_size, n_agents, obs_size],
-        [batch_size, chunk_size, n_agents],
-        [batch_size, chunk_size, n_agents],
-        [batch_size, chunk_size, n_agents, obs_size],
-        [batch_size, chunk_size, 1]
+
+
+        start_idx = [0, 11, 20]
+        chunk_size = 5
+        each agent should have = [[0, 1, 2, 3,4], [11, 12, 13, 14, 15], [20, 21, 22, 23, 24]]
+        actual result ={
+            red_0: [[0, 1, 2, 3, 4], [11, 12, 13, 14, 15], [20, 21, 22, 23, 24]],
+            red_1: [[0, 1, 2, 3, 4], [11, 12, 13, 14, x], [x, x, 31, 32, 33]],
+        }
         """
-        start_idx = np.random.randint(0, len(self.buffer) - chunk_size, batch_size)
-        s_lst, a_lst, r_lst, s_prime_lst, done_lst = [], [], [], [], []
+        start_idx = np.random.randint(0, len(self.buffer) - chunk_size, batch_size) # [batch_size]
+        states, actions, rewards, next_states, dones = defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list)
 
-        for idx in start_idx:
-            for chunk_step in range(idx, idx + chunk_size):
+        for idx in start_idx:   # [batch_size]
+            # We need a placeholder for each agent
+            # { agent: [batch_size * [chunk_size * Tensor(n)]] }
+            for agent in agents:
+                states[agent].append([])
+                actions[agent].append([])
+                rewards[agent].append([])
+                next_states[agent].append([])
+                dones[agent].append([])
+
+            for chunk_step in range(idx, idx + chunk_size): # [chunk_size]
+                # The transition of agents at each step
                 # state, action, reward, next_state, done
-                s, a, r, s_prime, done = self.buffer[chunk_step]
-                s_lst.append(s)
-                a_lst.append(a)
-                r_lst.append(r)
-                s_prime_lst.append(s_prime)
-                done_lst.append(done)
+                agent_states, agent_actions, agent_rewards, agent_next_states, agent_dones = self.buffer[chunk_step]
+                for agent in agent_states.keys():
+                    states[agent][-1].append(agent_states[agent])
+                    actions[agent][-1].append(agent_actions[agent])
+                    rewards[agent][-1].append(agent_rewards[agent])
+                    next_states[agent][-1].append(agent_next_states[agent])
+                    dones[agent][-1].append(agent_dones[agent])
 
-        n_agents, obs_size = len(s_lst[0]), len(s_lst[0][0])
-        return torch.tensor(s_lst, dtype=torch.float).view(batch_size, chunk_size, n_agents, obs_size), \
-               torch.tensor(a_lst, dtype=torch.float).view(batch_size, chunk_size, n_agents), \
-               torch.tensor(r_lst, dtype=torch.float).view(batch_size, chunk_size, n_agents), \
-               torch.tensor(s_prime_lst, dtype=torch.float).view(batch_size, chunk_size, n_agents, obs_size), \
-               torch.tensor(done_lst, dtype=torch.float).view(batch_size, chunk_size, 1)
+        # Convert to {agent:
+        return states, actions, rewards, next_states, dones
 
     def size(self):
         return len(self.buffer)
@@ -103,42 +115,50 @@ class QNet(nn.Module):
                 nn.Linear(self.hx_size, self.n_act_map[agent_i])
             )
 
-    def forward(self, obs: torch.Tensor, hidden: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+    def forward(self, obs: dict[str, torch.Tensor], hidden: dict[str, torch.Tensor]) -> (dict[str, torch.Tensor], dict[str, torch.Tensor]):
         """Predict q values for each agent's actions in the batch
-        :param obs: [batch_size, num_agents, n_obs]
-        :param hidden: [batch_size, num_agents, hx_size]
-        :return: q_values: [batch_size, num_agents, n_actions], hidden: [batch_size, num_agents, hx_size]
+        :param obs: {agent: [batch_size, n_obs]}
+        :param hidden: {agent: [batch_size, hx_size]}
+        :return: q_values: {agent: [batch_size, n_actions]}, hidden: {agent: [batch_size, hx_size]}
         """
-        batch_size = obs.shape[0]
         # TODO: we may have changing num_agents
-        q_values = [torch.empty(batch_size, )] * self.num_agents  # [len=num_agents, (batch_size)]
-        next_hidden = [torch.empty(batch_size, 1, self.hx_size)] * self.num_agents  # [len=num_agents, (batch_size, 1, hx_size)]
+        q_values = {}  # {agent: (batch_size, n_actions)}
+        next_hidden = {}  # {agent: (batch_size, hx_size)}
 
-        for i, agent_i in enumerate(self.agents):
-            if obs[:, i, :].count_nonzero() == 0:
-                q_values[i] = torch.zeros(batch_size, 1, self.n_act_map[agent_i])
-                continue
-            x = getattr(self, 'agent_feature_{}'.format(agent_i))(obs[:, i, :]) # [batch_size, n_obs] -> [batch_size, hx_size]
-            if self.recurrent:
-                x = getattr(self, 'agent_gru_{}'.format(agent_i))(x, hidden[:, i, :])   # [batch_size, hx_size]
-                next_hidden[i] = x.unsqueeze(1)  # [batch_size, 1, hx_size]
-            q_values[i] = getattr(self, 'agent_q_{}'.format(agent_i))(x).unsqueeze(1)   # [batch_size, 1, n_actions]
-        # q_values: [num_agents, (batch_size, 1, n_actions)]
-        return torch.cat(q_values, dim=1), torch.cat(next_hidden, dim=1)
-
-    def sample_action(self, obs: torch.Tensor, hidden: torch.Tensor, epsilon=1e3) -> (torch.Tensor, torch.Tensor):
-        """Choose action with epsilon-greedy policy, for each agent in the batch
-        :param obs: a batch of observations, [batch_size, num_agents, n_obs]
-        :param hidden: a batch of hidden states, [batch_size, num_agents, hx_size]
-        :param epsilon: exploration rate
-        :return: actions: [batch_size, num_agents], hidden: [batch_size, num_agents, hx_size]
         """
-        q_values, hidden = self.forward(obs, hidden)    # [batch_size, num_agents, n_actions], [batch_size, num_agents, hx_size]
+        red_01 (3 batch: 0, 1, 2) -> qval of (0, 1, 2) -> act of (0, 1, 2)
+        red_02 (2 batch: 0, 2   ) -> qval of (0, 2)    -> act of (0, 1, 2)
+        """
+
+        for i, agent in enumerate(obs.keys()):
+            x = getattr(self, 'agent_feature_{}'.format(agent))(obs[agent]) # [batch_size, n_obs] -> [batch_size, hx_size]
+            if self.recurrent:
+                x = getattr(self, 'agent_gru_{}'.format(agent))(x, hidden[:, i, :])   # [batch_size, hx_size]
+                next_hidden[agent] = x  # [batch_size, hx_size]
+            q_values[agent] = getattr(self, 'agent_q_{}'.format(agent))(x)   # [batch_size, n_actions]
+        return q_values, next_hidden
+
+    def sample_action(self, obs: dict[str, torch.Tensor], hidden: dict[str, torch.Tensor], epsilon=1e3) -> (dict[str, torch.Tensor], dict[str, torch.Tensor]):
+        """Choose action with epsilon-greedy policy, for each agent in the batch
+        :param obs: a batch of observations for each agent, {agent: [batch_size, n_obs]}
+        :param hidden: a batch of hidden states for each agent, {agent: [batch_size, hx_size]}
+        :param epsilon: exploration rate
+        :return: actions: {agent: (batch, action)}, hidden: {agent: (batch, hx_size)}
+        """
+        q_values, hidden = self.forward(obs, hidden)    # {agent: [batch_size, n_actions]}, {agent: [batch_size, hx_size]}
         # epsilon-greedy action selection
-        mask = (torch.rand((q_values.shape[0],)) <= epsilon)     # [batch_size]
-        actions = torch.empty((q_values.shape[0], q_values.shape[1],))     # [batch_size, num_agents]
-        actions[mask] = torch.randint(0, q_values.shape[2], actions[mask].shape).float()
-        actions[~mask] = q_values[~mask].argmax(dim=2).float()  # choose action with max q value
+        max_batch_size = max([q_values[agent].shape[0] for agent in q_values.keys()])
+        masked_batch = np.random.rand(max_batch_size) < epsilon  # Create a mask for the entire batch
+        actions = {}
+        for agent in q_values.keys():
+            agent_batch_size = q_values[agent].shape[0]
+            actions[agent] = torch.empty((agent_batch_size,), dtype=torch.long)
+            # Truncate the mask to the agent's batch size
+            agent_masks = masked_batch[:agent_batch_size]
+            # Random actions for masked batches
+            actions[agent][agent_masks] = torch.randint(0, self.n_act_map[agent], (agent_masks.sum(),))
+            # Best actions for non-masked batches
+            actions[agent][~agent_masks] = q_values[agent][~agent_masks].argmax(dim=1)
         return actions, hidden   # [batch_size, num_agents], [batch_size, num_agents, hx_size]
 
     def init_hidden(self, batch_size=1):
@@ -160,7 +180,8 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
             out: tuple[torch.Tensor, torch.Tensor] = q(states[:, step_i, :, :], hidden)  # [batch_size, num_agents, n_actions]
             q_out, hidden = out
             q_a = q_out.gather(2, actions[:, step_i, :].unsqueeze(-1).long()).squeeze(-1)   # [batch_size, num_agents]: q values of actions taken
-            sum_q = q_a.sum(dim=1, keepdims=True)   # [batch_size, 1]
+            # TODO: Using mean instead of sum, because num_agents may change
+            sum_q = q_a.mean(dim=1, keepdims=True)   # [batch_size, 1]
 
             max_q_prime, target_hidden = q_target(next_states[:, step_i, :, :], target_hidden.detach())
             max_q_prime = max_q_prime.max(dim=2)[0].squeeze(-1)
