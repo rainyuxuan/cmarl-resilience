@@ -7,6 +7,7 @@ from magent2.environments import battle_v4
 from dataclasses import dataclass
 import numpy as np
 import torch
+from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
@@ -34,47 +35,51 @@ class ReplayBuffer:
         """
         self.buffer.append(transition)
 
-    def sample_chunk(self, batch_size: int, chunk_size: int, agents: list[str]) -> dict[str, any]:
+    def sample_chunk(
+            self, batch_size: int, chunk_size: int,
+            agents: list[str]
+    ) -> tuple[list[dict[str, list[Tensor]]],
+          list[dict[str, list[int]]],
+          list[dict[str, list[float]]],
+          list[dict[str, list[Tensor]]],
+          list[dict[str, list[int]]]]:
         """Sample a batch of chunk_size transitions from the buffer
         :param batch_size: max number of batches to sample
         :param chunk_size: max length of horizon of each batch
-        :return: dict of (states, actions, rewards, next_states, dones),
-        their shapes are respectively:
-
-
-        start_idx = [0, 11, 20]
-        chunk_size = 5
-        each agent should have = [[0, 1, 2, 3,4], [11, 12, 13, 14, 15], [20, 21, 22, 23, 24]]
-        actual result ={
-            red_0: [[0, 1, 2, 3, 4], [11, 12, 13, 14, 15], [20, 21, 22, 23, 24]],
-            red_1: [[0, 1, 2, 3, 4], [11, 12, 13, 14, x], [x, x, 31, 32, 33]],
-        }
+        :param agents: list of all agents
+        :return: tuples of (states, actions, rewards, next_states, dones),
+        each of them is:
+        [{agent: [data|None for batch in range(batch_size)]} for chunk in range(chunk_size)]
         """
         start_idx = np.random.randint(0, len(self.buffer) - chunk_size, batch_size) # [batch_size]
-        states, actions, rewards, next_states, dones = defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list)
+        states, actions, rewards, next_states, dones = [], [], [], [], []
 
-        for idx in start_idx:   # [batch_size]
-            # We need a placeholder for each agent
-            # { agent: [batch_size * [chunk_size * Tensor(n)]] }
-            for agent in agents:
-                states[agent].append([])
-                actions[agent].append([])
-                rewards[agent].append([])
-                next_states[agent].append([])
-                dones[agent].append([])
+        for step in range(chunk_size):  # [chunk_size]
+            # Initialize data for each step
+            states.append(defaultdict(list))
+            actions.append(defaultdict(list))
+            rewards.append(defaultdict(list))
+            next_states.append(defaultdict(list))
+            dones.append(defaultdict(list))
 
-            for chunk_step in range(idx, idx + chunk_size): # [chunk_size]
+            for idx in start_idx:   # [batch_size]
+                i = idx + step
                 # The transition of agents at each step
-                # state, action, reward, next_state, done
-                agent_states, agent_actions, agent_rewards, agent_next_states, agent_dones = self.buffer[chunk_step]
-                for agent in agent_states.keys():
-                    states[agent][-1].append(agent_states[agent])
-                    actions[agent][-1].append(agent_actions[agent])
-                    rewards[agent][-1].append(agent_rewards[agent])
-                    next_states[agent][-1].append(agent_next_states[agent])
-                    dones[agent][-1].append(agent_dones[agent])
+                agent_states, agent_actions, agent_rewards, agent_next_states, agent_dones = self.buffer[i]
+                for agent in agents:
+                    if agent not in agent_states:
+                        states[-1][agent].append(None)
+                        actions[-1][agent].append(None)
+                        rewards[-1][agent].append(None)
+                        next_states[-1][agent].append(None)
+                        dones[-1][agent].append(None)
+                    else:
+                        states[-1][agent].append(agent_states[agent])
+                        actions[-1][agent].append(agent_actions[agent])
+                        rewards[-1][agent].append(agent_rewards[agent])
+                        next_states[-1][agent].append(agent_next_states[agent])
+                        dones[-1][agent].append(agent_dones[agent])
 
-        # Convert to {agent:
         return states, actions, rewards, next_states, dones
 
     def size(self):
@@ -125,11 +130,6 @@ class QNet(nn.Module):
         q_values = {}  # {agent: (batch_size, n_actions)}
         next_hidden = {}  # {agent: (batch_size, hx_size)}
 
-        """
-        red_01 (3 batch: 0, 1, 2) -> qval of (0, 1, 2) -> act of (0, 1, 2)
-        red_02 (2 batch: 0, 2   ) -> qval of (0, 2)    -> act of (0, 1, 2)
-        """
-
         for i, agent in enumerate(obs.keys()):
             x = getattr(self, 'agent_feature_{}'.format(agent))(obs[agent]) # [batch_size, n_obs] -> [batch_size, hx_size]
             if self.recurrent:
@@ -171,15 +171,41 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
     chunk_size = chunk_size if q.recurrent else 1
     for _ in range(update_iter):
         # Get data from buffer
-        states, actions, rewards, next_states, dones = memory.sample_chunk(batch_size, chunk_size)
+        states, actions, rewards, next_states, dones = memory.sample_chunk(batch_size, chunk_size, q.agents)
 
         hidden = q.init_hidden(batch_size)
         target_hidden = q_target.init_hidden(batch_size)
         loss = 0
         for step_i in range(chunk_size):
-            out: tuple[torch.Tensor, torch.Tensor] = q(states[:, step_i, :, :], hidden)  # [batch_size, num_agents, n_actions]
+            # Get batched data for each step
+            step_bstates = states[step_i]
+            step_bactions = actions[step_i]
+            active_batches = defaultdict(list)  # {agent: [batch_idx]}: active batches for each agent
+            state_tensors: dict[str, torch.Tensor] = {}  # {agent: [batch_size?, n_obs]}
+            action_tensors: dict[str, torch.Tensor] = {}  # {agent: [batch_size?]}
+            for agent in step_bstates.keys():
+                active_batches[agent] = [i for i, state in enumerate(step_bstates[agent]) if state is not None]
+                state_tensors[agent] = torch.tensor([state for state in step_bstates[agent] if state is not None])
+                action_tensors[agent] = torch.tensor([action for action in step_bactions[agent] if action is not None])
+
+            # Compute Q values for each agent's actions
+            out: tuple[dict[str, torch.Tensor], any] = q(state_tensors, hidden)  # [batch_size, num_agents, n_actions]
             q_out, hidden = out
-            q_a = q_out.gather(2, actions[:, step_i, :].unsqueeze(-1).long()).squeeze(-1)   # [batch_size, num_agents]: q values of actions taken
+            # Choose Q values for actions taken
+            """
+            red_0: qval of [batch_size?, n_actions] for only the active batches of the agent
+            Select the q values of the actions taken by the agent
+            -> red_0: q_a of [batch_size?]
+            Dispatch the q values of active batches to all batches
+            
+            # red_0: 1,3,5
+            # red_1: 1, ,5
+            
+            sum_q: the sum of q values of all agents for each batch
+            """
+
+
+            # q_a = torch.stack([q_out[agent][active_batches[agent], action_tensors[agent]] for agent in q.agents], dim=1)  # [batch_size, num_agents]
             # TODO: Using mean instead of sum, because num_agents may change
             sum_q = q_a.mean(dim=1, keepdims=True)   # [batch_size, 1]
 
