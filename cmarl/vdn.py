@@ -9,15 +9,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from functools import reduce
 import gymnasium as gym
 import pettingzoo
 from tqdm import tqdm
 
-from cmarl.utils import compute_output_dim
+from cmarl.utils import compute_output_dim, reseed
 from cmarl.utils.team import TeamManager
 
 USE_WANDB = False  # if enabled, logs data on wandb server
+
+seed=42
 
 @dataclass
 class VdnHyperparameters:
@@ -58,15 +59,19 @@ class ReplayBuffer:
                 r_lst.append(r)
                 s_prime_lst.append(s_prime)
                 done_lst.append(done)
-
         num_agents = len(s_lst[0])
         obs_shape = s_lst[0][0].shape
+        s_lst = np.array(s_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape)
+        a_lst = np.array(a_lst).reshape(batch_size, chunk_size, num_agents)
+        r_lst = np.array(r_lst).reshape(batch_size, chunk_size, num_agents)
+        s_prime_lst = np.array(s_prime_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape)
+        done_lst = np.array(done_lst).reshape(batch_size, chunk_size, 1)
         return (
-            torch.tensor(s_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape),
-            torch.tensor(a_lst).reshape(batch_size, chunk_size, num_agents),
-            torch.tensor(r_lst).reshape(batch_size, chunk_size, num_agents),
-            torch.tensor(s_prime_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape),
-            torch.tensor(done_lst).reshape(batch_size, chunk_size, 1)
+            torch.tensor(s_lst, dtype=torch.float32),
+            torch.tensor(a_lst, dtype=torch.float32),
+            torch.tensor(r_lst, dtype=torch.float32),
+            torch.tensor(s_prime_lst, dtype=torch.float32),
+            torch.tensor(done_lst, dtype=torch.float32)
         )
 
     def size(self):
@@ -203,7 +208,8 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
     """Run an episode in the environment
     :return: total score of the episode
     """
-    observations: dict[str, np.ndarray] = env.reset()
+    reseed(42)
+    observations: dict[str, np.ndarray] = env.reset(seed=seed)
     team_manager = TeamManager(env.agents)
     teams = team_manager.get_teams()
     my_team = team_manager.get_my_team()
@@ -212,9 +218,6 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
 
     while not team_manager.has_terminated_teams():
         my_team_observations = team_manager.get_info_of_team(my_team, observations)
-        # for agent in my_team_observations.keys():
-        #     if my_team_observations[agent] is None:
-        #         my_team_observations[agent] = torch.zeros(q.n_obs_map[agent])
         # Get actions for each agent based on the team
         agent_actions: dict[str, Optional[int]] = {}  # {agent: action}
         for team in teams:
@@ -284,11 +287,12 @@ def main(
         lr, gamma, batch_size, buffer_limit, log_interval, max_episodes, max_epsilon, min_epsilon,
         test_episodes, warm_up_steps, update_iter, chunk_size, update_target_interval, recurrent: bool = False
 ):
+    reseed(42)
     # create env.
     memory = ReplayBuffer(buffer_limit)
 
     # Setup env
-    env.reset()
+    env.reset(seed=seed)
     team_manager = TeamManager(env.agents)
     my_team = team_manager.get_my_team()
     print(my_team)
@@ -302,8 +306,8 @@ def main(
     score = 0
     for episode_i in tqdm(range(max_episodes)):
         epsilon = max(min_epsilon, max_epsilon - (max_epsilon - min_epsilon) * (episode_i / (0.6 * max_episodes)))
-        with torch.no_grad():
-            score += run_episode(env, q, memory, epsilon)
+        q.eval()
+        score += run_episode(env, q, memory, epsilon)
 
         if memory.size() > warm_up_steps:
             train(q, q_target, memory, optimizer, gamma, batch_size, update_iter, chunk_size)
@@ -335,24 +339,24 @@ if __name__ == '__main__':
 
     kwargs = {
         "env": adversarial_pursuit_v4.parallel_env(
-            map_size=35, render_mode="human", max_cycles=3000, tag_penalty=0
+            map_size=35, render_mode="human", max_cycles=1000, tag_penalty=0
         ),
         "test_env": adversarial_pursuit_v4.parallel_env(
-            map_size=35, render_mode="human", max_cycles=3000, tag_penalty=0
+            map_size=35, render_mode="human", max_cycles=1000, tag_penalty=0
         ),
-        "lr": 0.001,
+        "lr": 0.01,
         "batch_size": 32,
         "gamma": 0.99,
-        "buffer_limit": 18000,
+        "buffer_limit": 9000,
         "update_target_interval": 10,
-        "log_interval": 100,
+        "log_interval": 10,
         "max_episodes": args.max_episodes,
         "max_epsilon": 0.9,
         "min_epsilon": 0.1,
         "test_episodes": 5,
-        "warm_up_steps": 9000,
-        "update_iter": 20,
-        "chunk_size": 10,  # if not recurrent, internally, we use chunk_size of 1 and no gru cell is used.
+        "warm_up_steps": 3000,
+        "update_iter": 20,  # epochs
+        "chunk_size": 1,  # if not recurrent, internally, we use chunk_size of 1 and no gru cell is used.
         "recurrent": False,
     }
 
