@@ -2,7 +2,7 @@ import argparse
 import collections
 from typing import Optional
 
-from magent2.environments import battle_v4
+from magent2.environments import adversarial_pursuit_v4
 from dataclasses import dataclass
 import numpy as np
 import torch
@@ -14,7 +14,7 @@ import gymnasium as gym
 import pettingzoo
 from tqdm import tqdm
 
-from utils.team import TeamManager
+from cmarl.utils.team import TeamManager
 
 USE_WANDB = False  # if enabled, logs data on wandb server
 
@@ -115,9 +115,9 @@ class QNet(nn.Module):
         next_hidden = [torch.empty(batch_size, 1, self.hx_size)] * self.num_agents  # [len=num_agents, (batch_size, 1, hx_size)]
 
         for i, agent_i in enumerate(self.agents):
-            if obs[:, i, :].count_nonzero() == 0:
-                q_values[i] = torch.zeros(batch_size, 1, self.n_act_map[agent_i])
-                continue
+            # if obs[:, i, :].count_nonzero() == 0:   # if all zeros (terminated), skip
+            #     q_values[i] = torch.zeros(batch_size, 1, self.n_act_map[agent_i])
+            #     continue
             x = getattr(self, 'agent_feature_{}'.format(agent_i))(obs[:, i, :]) # [batch_size, n_obs] -> [batch_size, hx_size]
             if self.recurrent:
                 x = getattr(self, 'agent_gru_{}'.format(agent_i))(x, hidden[:, i, :])   # [batch_size, hx_size]
@@ -190,22 +190,25 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
     observations: dict[str, np.ndarray] = env.reset()
     team_manager = TeamManager(env.agents)
     teams = team_manager.get_teams()
-    my_team = teams[0]
+    my_team = team_manager.get_my_team()
     hidden = q.init_hidden()
     score = 0.0
     flatten_observations = flatten_observation(observations)
 
     while not team_manager.has_terminated_teams():
         my_team_observations = team_manager.get_info_of_team(my_team, flatten_observations)
-        for agent in my_team_observations.keys():
-            if my_team_observations[agent] is None:
-                my_team_observations[agent] = torch.zeros(q.n_obs_map[agent])
+        # for agent in my_team_observations.keys():
+        #     if my_team_observations[agent] is None:
+        #         my_team_observations[agent] = torch.zeros(q.n_obs_map[agent])
         # Get actions for each agent based on the team
         agent_actions: dict[str, Optional[int]] = {}  # {agent: action}
         for team in teams:
             if team == my_team:
                 # TODO: Fill rows with zeros for terminated agents
-                team_observations = torch.tensor([my_team_observations[agent] for agent in team_manager.get_team_agents(team)]).unsqueeze(0)
+                team_observations = torch.tensor(np.array([
+                    my_team_observations[agent]
+                    for agent in team_manager.get_team_agents(team)
+                ])).unsqueeze(0)    # [batch_size=1, num_agents, n_obs]
                 # team_hidden = team_manager.get_info_of_team(team, hidden) TODO: we need a mapping from agent to index
                 actions, team_hiddens = q.sample_action(team_observations, hidden, epsilon)
                 team_actions = {
@@ -245,6 +248,7 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
         for agent, done in agent_truncations.items():
             if done:
                 team_manager.terminate_agent(agent)
+    print('Score:', score)
     return score
 
 def test(env: pettingzoo.ParallelEnv, num_episodes: int, q: QNet):
@@ -272,7 +276,8 @@ def main(
     # Setup env
     env.reset()
     team_manager = TeamManager(env.agents)
-    my_team = team_manager.get_teams()[0]
+    my_team = team_manager.get_my_team()
+    print(my_team)
 
     # create networks
     q = QNet(team_manager.get_team_agents(my_team), env.observation_spaces, env.action_spaces, recurrent)
@@ -315,23 +320,23 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     kwargs = {
-        "env": battle_v4.parallel_env(
-            map_size=20, render_mode="human", max_cycles=5000, step_reward=0, attack_penalty=0.01
+        "env": adversarial_pursuit_v4.parallel_env(
+            map_size=45, render_mode="human", max_cycles=3000, tag_penalty=0
         ),
-        "test_env": battle_v4.parallel_env(
-            map_size=20, render_mode="human", max_cycles=5000, step_reward=0, attack_penalty=0.01
+        "test_env": adversarial_pursuit_v4.parallel_env(
+            map_size=45, render_mode="human", max_cycles=3000, tag_penalty=0
         ),
         "lr": 0.001,
         "batch_size": 32,
         "gamma": 0.99,
-        "buffer_limit": 5000,
+        "buffer_limit": 30000,
         "update_target_interval": 20,
         "log_interval": 100,
         "max_episodes": args.max_episodes,
         "max_epsilon": 0.9,
         "min_epsilon": 0.1,
         "test_episodes": 5,
-        "warm_up_steps": 20,
+        "warm_up_steps": 3000,
         "update_iter": 10,
         "chunk_size": 10,  # if not recurrent, internally, we use chunk_size of 1 and no gru cell is used.
         "recurrent": False,

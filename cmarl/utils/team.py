@@ -15,6 +15,14 @@ class TeamManager:
         """
         return list(self.teams.keys())
 
+    def get_my_team(self):
+        if 'tiger' in self.teams:
+            return 'tiger'
+        elif 'predator' in self.teams:
+            return 'predator'
+        else:
+            return self.get_teams()[0]
+
     def get_team_agents(self, team: str) -> list[str]:
         """
         Get the agents in a team.
@@ -50,7 +58,6 @@ class TeamManager:
                 result[agent] = default
             else:
                 result[agent] = data[agent]
-
         return result
     
     def reset(self):
