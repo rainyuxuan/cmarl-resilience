@@ -14,6 +14,7 @@ import gymnasium as gym
 import pettingzoo
 from tqdm import tqdm
 
+from cmarl.utils import compute_output_dim
 from cmarl.utils.team import TeamManager
 
 USE_WANDB = False  # if enabled, logs data on wandb server
@@ -39,10 +40,10 @@ class ReplayBuffer:
         :param chunk_size: length of horizon of each batch
         :return: tuple of (states, actions, rewards, next_states, dones),
         their shapes are respectively:
-        [batch_size, chunk_size, n_agents, obs_size],
+        [batch_size, chunk_size, n_agents, ...obs_shape],
         [batch_size, chunk_size, n_agents],
         [batch_size, chunk_size, n_agents],
-        [batch_size, chunk_size, n_agents, obs_size],
+        [batch_size, chunk_size, n_agents, ...obs_shape],
         [batch_size, chunk_size, 1]
         """
         start_idx = np.random.randint(0, len(self.buffer) - chunk_size, batch_size)
@@ -50,7 +51,7 @@ class ReplayBuffer:
 
         for idx in start_idx:
             for chunk_step in range(idx, idx + chunk_size):
-                # state, action, reward, next_state, done
+                # (state, action, reward, next_state, done) * num_agent
                 s, a, r, s_prime, done = self.buffer[chunk_step]
                 s_lst.append(s)
                 a_lst.append(a)
@@ -58,12 +59,15 @@ class ReplayBuffer:
                 s_prime_lst.append(s_prime)
                 done_lst.append(done)
 
-        n_agents, obs_size = len(s_lst[0]), len(s_lst[0][0])
-        return torch.tensor(s_lst, dtype=torch.float).view(batch_size, chunk_size, n_agents, obs_size), \
-               torch.tensor(a_lst, dtype=torch.float).view(batch_size, chunk_size, n_agents), \
-               torch.tensor(r_lst, dtype=torch.float).view(batch_size, chunk_size, n_agents), \
-               torch.tensor(s_prime_lst, dtype=torch.float).view(batch_size, chunk_size, n_agents, obs_size), \
-               torch.tensor(done_lst, dtype=torch.float).view(batch_size, chunk_size, 1)
+        num_agents = len(s_lst[0])
+        obs_shape = s_lst[0][0].shape
+        return (
+            torch.tensor(s_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape),
+            torch.tensor(a_lst).reshape(batch_size, chunk_size, num_agents),
+            torch.tensor(r_lst).reshape(batch_size, chunk_size, num_agents),
+            torch.tensor(s_prime_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape),
+            torch.tensor(done_lst).reshape(batch_size, chunk_size, 1)
+        )
 
     def size(self):
         return len(self.buffer)
@@ -76,20 +80,31 @@ class QNet(nn.Module):
         self.num_agents = len(agents)
         self.recurrent = recurrent
         self.hx_size = 32   # latent repr size
-        self.n_obs_map = {agent: reduce((lambda x, y: x * y), observation_spaces[agent].shape) for agent in agents}  # observation space flatten size of agents
+        self.n_obs_map = {agent: observation_spaces[agent].shape for agent in agents}  # observation space flatten size of agents
         self.n_act_map = {agent: action_spaces[agent].n for agent in agents}  # action space size of agents
-        self.idx_map = {agent: i for i, agent in enumerate(agents)}
+
+        stride1, stride2 = 1, 1
+        padding1, padding2 = 0, 0
+        kernel_size1, kernel_size2 = 3, 3
+        pool_kernel_size, pool_stride = 2, 2
 
         for agent_i in agents:
-            # flatten magent env observation space
             n_obs = self.n_obs_map[agent_i]
-            idx = self.idx_map[agent_i]
+            height = n_obs[0]  # n_obs is a tuple (height, width, channels)
+            out_dim1 = compute_output_dim(height, kernel_size1, stride1, padding1) // pool_stride
+            out_dim2 = compute_output_dim(out_dim1, kernel_size2, stride2, padding2) // pool_stride
+
+            # Compute the final flattened size
+            flattened_size = out_dim2 * out_dim2 * 64
             setattr(
                 self, 'agent_feature_{}'.format(agent_i),   # shape: n_obs, hx_size
                 nn.Sequential(
-                    nn.Linear(n_obs, 64),
-                    nn.ReLU(),
-                    nn.Linear(64, self.hx_size),
+                    nn.Conv2d(n_obs[2], 32, kernel_size=kernel_size1, stride=stride1, padding=padding1),
+                    nn.MaxPool2d(kernel_size=pool_kernel_size, stride=pool_stride),
+                    nn.Conv2d(32, 64, kernel_size=kernel_size2, stride=stride2, padding=padding2),
+                    nn.MaxPool2d(kernel_size=pool_kernel_size, stride=pool_stride),
+                    nn.Flatten(),
+                    nn.Linear(flattened_size, self.hx_size),
                     nn.ReLU()
                 )
             )
@@ -105,7 +120,7 @@ class QNet(nn.Module):
 
     def forward(self, obs: torch.Tensor, hidden: torch.Tensor) -> (torch.Tensor, torch.Tensor):
         """Predict q values for each agent's actions in the batch
-        :param obs: [batch_size, num_agents, n_obs]
+        :param obs: [batch_size, num_agents, ...n_obs]
         :param hidden: [batch_size, num_agents, hx_size]
         :return: q_values: [batch_size, num_agents, n_actions], hidden: [batch_size, num_agents, hx_size]
         """
@@ -115,10 +130,8 @@ class QNet(nn.Module):
         next_hidden = [torch.empty(batch_size, 1, self.hx_size)] * self.num_agents  # [len=num_agents, (batch_size, 1, hx_size)]
 
         for i, agent_i in enumerate(self.agents):
-            # if obs[:, i, :].count_nonzero() == 0:   # if all zeros (terminated), skip
-            #     q_values[i] = torch.zeros(batch_size, 1, self.n_act_map[agent_i])
-            #     continue
-            x = getattr(self, 'agent_feature_{}'.format(agent_i))(obs[:, i, :]) # [batch_size, n_obs] -> [batch_size, hx_size]
+            agent_obs = obs[:, i].permute(0, 3, 1, 2)
+            x = getattr(self, 'agent_feature_{}'.format(agent_i))(agent_obs) # [batch_size, n_obs] -> [batch_size, hx_size]
             if self.recurrent:
                 x = getattr(self, 'agent_gru_{}'.format(agent_i))(x, hidden[:, i, :])   # [batch_size, hx_size]
                 next_hidden[i] = x.unsqueeze(1)  # [batch_size, 1, hx_size]
@@ -149,7 +162,8 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
     q.train()
     q_target.eval()
     chunk_size = chunk_size if q.recurrent else 1
-    for _ in range(update_iter):
+    losses = []
+    for i in range(update_iter):
         # Get data from buffer
         states, actions, rewards, next_states, dones = memory.sample_chunk(batch_size, chunk_size)
 
@@ -174,29 +188,30 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
             hidden[done_mask] = q.init_hidden(len(hidden[done_mask]))
             target_hidden[done_mask] = q_target.init_hidden(len(target_hidden[done_mask]))
 
+        losses.append(loss.item())
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(q.parameters(), grad_clip_norm, norm_type=2)
         optimizer.step()
+
+    print('Loss:', losses)
+    return losses
+
 
 
 def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuffer] = None, epsilon=0.1) -> float:
     """Run an episode in the environment
     :return: total score of the episode
     """
-    def flatten_observation(observations: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        return {agent: obs.flatten() for agent, obs in observations.items()}
-
     observations: dict[str, np.ndarray] = env.reset()
     team_manager = TeamManager(env.agents)
     teams = team_manager.get_teams()
     my_team = team_manager.get_my_team()
     hidden = q.init_hidden()
     score = 0.0
-    flatten_observations = flatten_observation(observations)
 
     while not team_manager.has_terminated_teams():
-        my_team_observations = team_manager.get_info_of_team(my_team, flatten_observations)
+        my_team_observations = team_manager.get_info_of_team(my_team, observations)
         # for agent in my_team_observations.keys():
         #     if my_team_observations[agent] is None:
         #         my_team_observations[agent] = torch.zeros(q.n_obs_map[agent])
@@ -230,14 +245,13 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
         # Step the environment
         observations, agent_rewards, agent_terminations, agent_truncations, agent_infos = env.step(agent_actions)
         score += sum(team_manager.get_info_of_team(my_team, agent_rewards, 0).values())
-        flatten_observations = flatten_observation(observations)
 
         if memory is not None:
             memory.put((
                 list(my_team_observations.values()),
                 list(team_manager.get_info_of_team(my_team, agent_actions).values()),
                 list(team_manager.get_info_of_team(my_team, agent_rewards, 0).values()),
-                list(team_manager.get_info_of_team(my_team, flatten_observations).values()),
+                list(team_manager.get_info_of_team(my_team, observations).values()),
                 [int(team_manager.has_terminated_teams())]
             ))
 
@@ -321,23 +335,23 @@ if __name__ == '__main__':
 
     kwargs = {
         "env": adversarial_pursuit_v4.parallel_env(
-            map_size=45, render_mode="human", max_cycles=3000, tag_penalty=0
+            map_size=35, render_mode="human", max_cycles=3000, tag_penalty=0
         ),
         "test_env": adversarial_pursuit_v4.parallel_env(
-            map_size=45, render_mode="human", max_cycles=3000, tag_penalty=0
+            map_size=35, render_mode="human", max_cycles=3000, tag_penalty=0
         ),
         "lr": 0.001,
         "batch_size": 32,
         "gamma": 0.99,
-        "buffer_limit": 30000,
-        "update_target_interval": 20,
+        "buffer_limit": 18000,
+        "update_target_interval": 10,
         "log_interval": 100,
         "max_episodes": args.max_episodes,
         "max_epsilon": 0.9,
         "min_epsilon": 0.1,
         "test_episodes": 5,
-        "warm_up_steps": 3000,
-        "update_iter": 10,
+        "warm_up_steps": 9000,
+        "update_iter": 20,
         "chunk_size": 10,  # if not recurrent, internally, we use chunk_size of 1 and no gru cell is used.
         "recurrent": False,
     }
