@@ -1,5 +1,6 @@
 import argparse
 import collections
+import datetime
 from typing import Optional
 
 from magent2.environments import adversarial_pursuit_v4
@@ -13,12 +14,13 @@ import gymnasium as gym
 import pettingzoo
 from tqdm import tqdm
 
-from cmarl.utils import compute_output_dim, reseed
+from cmarl.utils import compute_output_dim, reseed, save_model, load_model, has_today_model
 from cmarl.utils.team import TeamManager
 
 USE_WANDB = False  # if enabled, logs data on wandb server
 
 seed=42
+today = datetime.date.today()
 
 @dataclass
 class VdnHyperparameters:
@@ -85,43 +87,33 @@ class QNet(nn.Module):
         self.num_agents = len(agents)
         self.recurrent = recurrent
         self.hx_size = 32   # latent repr size
-        self.n_obs_map = {agent: observation_spaces[agent].shape for agent in agents}  # observation space flatten size of agents
-        self.n_act_map = {agent: action_spaces[agent].n for agent in agents}  # action space size of agents
+        self.n_obs = observation_spaces[agents[0]].shape    # observation space size of agents
+        self.n_act = action_spaces[agents[0]].n  # action space size of agents
 
         stride1, stride2 = 1, 1
         padding1, padding2 = 0, 0
         kernel_size1, kernel_size2 = 3, 3
         pool_kernel_size, pool_stride = 2, 2
 
-        for agent_i in agents:
-            n_obs = self.n_obs_map[agent_i]
-            height = n_obs[0]  # n_obs is a tuple (height, width, channels)
-            out_dim1 = compute_output_dim(height, kernel_size1, stride1, padding1) // pool_stride
-            out_dim2 = compute_output_dim(out_dim1, kernel_size2, stride2, padding2) // pool_stride
+        height = self.n_obs[0]  # n_obs is a tuple (height, width, channels)
+        out_dim1 = compute_output_dim(height, kernel_size1, stride1, padding1) // pool_stride
+        out_dim2 = compute_output_dim(out_dim1, kernel_size2, stride2, padding2) // pool_stride
 
-            # Compute the final flattened size
-            flattened_size = out_dim2 * out_dim2 * 64
-            setattr(
-                self, 'agent_feature_{}'.format(agent_i),   # shape: n_obs, hx_size
-                nn.Sequential(
-                    nn.Conv2d(n_obs[2], 32, kernel_size=kernel_size1, stride=stride1, padding=padding1),
-                    nn.MaxPool2d(kernel_size=pool_kernel_size, stride=pool_stride),
-                    nn.Conv2d(32, 64, kernel_size=kernel_size2, stride=stride2, padding=padding2),
-                    nn.MaxPool2d(kernel_size=pool_kernel_size, stride=pool_stride),
-                    nn.Flatten(),
-                    nn.Linear(flattened_size, self.hx_size),
-                    nn.ReLU()
-                )
-            )
-            if recurrent:
-                setattr(
-                    self, 'agent_gru_{}'.format(agent_i),   # shape: hx_size, hx_size
-                    nn.GRUCell(self.hx_size, self.hx_size)
-                )
-            setattr(
-                self, 'agent_q_{}'.format(agent_i),     # shape: hx_size, n_actions
-                nn.Linear(self.hx_size, self.n_act_map[agent_i])
-            )
+        # Compute the final flattened size
+        flattened_size = out_dim2 * out_dim2 * 64
+        self.feature_cnn = nn.Sequential(
+            nn.Conv2d(self.n_obs[2], 32, kernel_size=kernel_size1, stride=stride1, padding=padding1),
+            nn.MaxPool2d(kernel_size=pool_kernel_size, stride=pool_stride),
+            nn.Conv2d(32, 64, kernel_size=kernel_size2, stride=stride2, padding=padding2),
+            nn.MaxPool2d(kernel_size=pool_kernel_size, stride=pool_stride),
+            nn.Flatten(),
+            nn.Linear(flattened_size, self.hx_size),
+            nn.ReLU()
+        )
+        if recurrent:
+            self.gru =  nn.GRUCell(self.hx_size, self.hx_size)  # shape: hx_size, hx_size
+        self.q_val = nn.Linear(self.hx_size, self.n_act)    # shape: hx_size, n_actions
+
 
     def forward(self, obs: torch.Tensor, hidden: torch.Tensor) -> (torch.Tensor, torch.Tensor):
         """Predict q values for each agent's actions in the batch
@@ -130,19 +122,18 @@ class QNet(nn.Module):
         :return: q_values: [batch_size, num_agents, n_actions], hidden: [batch_size, num_agents, hx_size]
         """
         batch_size = obs.shape[0]
-        # TODO: we may have changing num_agents
-        q_values = [torch.empty(batch_size, )] * self.num_agents  # [len=num_agents, (batch_size)]
-        next_hidden = [torch.empty(batch_size, 1, self.hx_size)] * self.num_agents  # [len=num_agents, (batch_size, 1, hx_size)]
+        q_values = torch.empty((batch_size, self.num_agents, self.n_act))
+        next_hidden = torch.empty((batch_size, self.num_agents, self.hx_size))
 
         for i, agent_i in enumerate(self.agents):
-            agent_obs = obs[:, i].permute(0, 3, 1, 2)
-            x = getattr(self, 'agent_feature_{}'.format(agent_i))(agent_obs) # [batch_size, n_obs] -> [batch_size, hx_size]
+            agent_obs = obs[:, i].permute(0, 3, 1, 2)   # [batch_size, *n_obs] -> [batch_size, channels, height, width]
+            x = self.feature_cnn(agent_obs) # [batch_size, *n_obs] -> [batch_size, hx_size]
             if self.recurrent:
-                x = getattr(self, 'agent_gru_{}'.format(agent_i))(x, hidden[:, i, :])   # [batch_size, hx_size]
-                next_hidden[i] = x.unsqueeze(1)  # [batch_size, 1, hx_size]
-            q_values[i] = getattr(self, 'agent_q_{}'.format(agent_i))(x).unsqueeze(1)   # [batch_size, 1, n_actions]
+                x = self.gru(x, hidden[:, i, :])   # [batch_size, hx_size]
+                next_hidden[:, i, :] = x  # [batch_size, hx_size]
+            q_values[:, i, :] = self.q_val(x)   # [batch_size, n_actions]
         # q_values: [num_agents, (batch_size, 1, n_actions)]
-        return torch.cat(q_values, dim=1), torch.cat(next_hidden, dim=1)
+        return q_values, next_hidden
 
     def sample_action(self, obs: torch.Tensor, hidden: torch.Tensor, epsilon=1e3) -> (torch.Tensor, torch.Tensor):
         """Choose action with epsilon-greedy policy, for each agent in the batch
@@ -304,6 +295,14 @@ def main(
     optimizer = optim.Adam(q.parameters(), lr=lr)
 
     score = 0
+    test_score = 0
+
+    # Load model if exists
+    if has_today_model(f'vdn-{today}'):
+        q_test = load_model(QNet(team_manager.get_team_agents(my_team), env.observation_spaces, env.action_spaces, recurrent), f'vdn-{today}')
+        test_score = test(test_env, test_episodes, q_test)
+
+    # Train and test
     for episode_i in tqdm(range(max_episodes)):
         epsilon = max(min_epsilon, max_epsilon - (max_epsilon - min_epsilon) * (episode_i / (0.6 * max_episodes)))
         q.eval()
@@ -316,7 +315,12 @@ def main(
             q_target.load_state_dict(q.state_dict())
 
         if (episode_i + 1) % log_interval == 0:
+            prev_test_score = test_score
             test_score = test(test_env, test_episodes, q)
+            if test_score > prev_test_score:
+                save_model(q, f'vdn-{today}')
+                print("Model saved at episode: ", episode_i)
+
             train_score = score / log_interval
             print("#{:<10}/{} episodes , avg train score : {:.1f}, test score: {:.1f} n_buffer : {}, eps : {:.1f}"
                   .format(episode_i, max_episodes, train_score, test_score, memory.size(), epsilon))
