@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 
-from cmarl.utils import compute_output_dim, reseed, TeamManager, has_today_model, today, load_model, save_model
+from cmarl.utils import compute_output_dim, reseed, TeamManager, is_model_found, today, load_model, save_model
 from cmarl.utils.buffer import ReplayBuffer
 import gymnasium as gym
 
@@ -18,11 +18,11 @@ from cmarl.utils.env import envs_config
 
 seed = 42
 
-class QNet(nn.Module):
+class IqdnQNet(nn.Module):
     model_name = 'IDQN'
 
     def __init__(self, observation_space: gym.spaces.Space, action_space: gym.spaces.Space):
-        super(QNet, self).__init__()
+        super(IqdnQNet, self).__init__()
         self.hx_size = 32  # latent repr size
         self.observation_space = observation_space  # observation space of agents
         self.action_space = action_space  # action space of agents
@@ -74,7 +74,7 @@ class QNet(nn.Module):
             return self.forward(obs).argmax(dim=1)
 
 
-def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuffer]=None, epsilon: float=0):
+def run_episode(env: pettingzoo.ParallelEnv, q: IqdnQNet, memory: Optional[ReplayBuffer]=None, epsilon: float=0):
     observations: dict[str, np.ndarray] = env.reset()
     team_manager = TeamManager(env.agents)
     teams = team_manager.get_teams()
@@ -157,7 +157,7 @@ def train(q, q_target, memory, optimizer, gamma, batch_size, update_iter=10):
     return np.mean(losses, axis=1)
 
 
-def test(env: pettingzoo.ParallelEnv, num_episodes: int, q: QNet):
+def test(env: pettingzoo.ParallelEnv, num_episodes: int, q: IqdnQNet):
     """
     :param env: Environment
     :param num_episodes: How many episodes to test
@@ -189,16 +189,16 @@ def main(
 
     # create networks
     any_agent = team_manager.get_team_agents(my_team)[0]
-    q = QNet(env.observation_spaces[any_agent], env.action_spaces[any_agent])
-    q_target = QNet(env.observation_spaces[any_agent], env.action_spaces[any_agent])
+    q = IqdnQNet(env.observation_spaces[any_agent], env.action_spaces[any_agent])
+    q_target = IqdnQNet(env.observation_spaces[any_agent], env.action_spaces[any_agent])
     q_target.load_state_dict(q.state_dict())
     optimizer = optim.Adam(q.parameters(), lr=lr)
 
     # Load model if exists
     test_score = 0
-    if has_today_model(f'idqn-{today}'):
+    if is_model_found(f'idqn-{today}'):
         q_test = load_model(
-            QNet(env.observation_spaces[any_agent], env.action_spaces[any_agent]),
+            IqdnQNet(env.observation_spaces[any_agent], env.action_spaces[any_agent]),
             f'idqn-{today}')
         test_score = test(test_env, test_episodes, q_test)
         print("Model loaded. Test score: ", test_score)

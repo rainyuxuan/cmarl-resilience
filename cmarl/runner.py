@@ -5,7 +5,7 @@ import pettingzoo
 from torch import nn, optim
 from tqdm import tqdm
 
-from cmarl.utils import reseed, TeamManager, today, has_today_model, load_model, save_model, save_data
+from cmarl.utils import reseed, TeamManager, is_model_found, load_model, save_model, save_data
 from cmarl.utils.buffer import ReplayBuffer
 
 seed = 42
@@ -28,7 +28,14 @@ class Hyperparameters:
     chunk_size: int = 1
 
 
-def test(env: pettingzoo.ParallelEnv, num_episodes: int, model: nn.Module, run_episode_fn: callable):
+def experiment(env: pettingzoo.ParallelEnv, test_env: pettingzoo.ParallelEnv, model: nn.Module, hp: Hyperparameters,
+                run_episode_fn: callable):
+    pass
+
+
+
+
+def evaluate_model(env: pettingzoo.ParallelEnv, num_episodes: int, model: nn.Module, run_episode_fn: callable):
     """
     :param env: Environment
     :param num_episodes: How many episodes to test
@@ -36,7 +43,6 @@ def test(env: pettingzoo.ParallelEnv, num_episodes: int, model: nn.Module, run_e
     :return: average score over num_episodes
     """
     model.eval()
-    env.reset(seed=seed)
     score = 0
     for episode_i in range(num_episodes):
         score += run_episode_fn(env, model, epsilon=0)
@@ -49,7 +55,7 @@ def run_model_train_test(
         Model: callable,
         model: nn.Module,
         target_model: nn.Module,
-        model_args: dict,
+        save_name: str,
         team_manager: TeamManager,
         hp: Hyperparameters,
         train_fn: callable,
@@ -57,19 +63,19 @@ def run_model_train_test(
 ) -> (list[float], list[float]):
     """
     Run training and testing loop of a model
+
     :param env: Training environment
     :param test_env: Testing environment
     :param Model: Model class
     :param model: training model
     :param target_model: target model
-    :param model_args: arguments for Model
+    :param save_name: name to save the model
     :param team_manager: TeamManager
     :param hp: Hyperparameters
     :param train_fn: training function
     :param run_episode_fn: function to run an episode
     :return: train_scores, test_scores
     """
-
     reseed(seed)
     # create env.
     memory = ReplayBuffer(hp.buffer_limit)
@@ -79,7 +85,7 @@ def run_model_train_test(
     env.reset(seed=seed)
     my_team = team_manager.get_my_team()
     model_name = Model.model_name
-    print("Running model: ", model_name)
+    print("Training model: ", model_name)
     print("My team: ", my_team)
 
     # Load target model
@@ -89,14 +95,6 @@ def run_model_train_test(
     test_score = 0
     train_scores = []
     test_scores = []
-
-    # Load a benchmark performance if exists
-    if has_today_model(f'{model_name}-{today}'):
-        q_test = load_model(
-            Model(**model_args),
-            f'{model_name}-{today}')
-        test_score = test(test_env, hp.test_episodes, q_test, run_episode_fn)
-        print("Model loaded. Test score: ", test_score)
 
     # Train and test
     optimizer = optim.Adam(model.parameters(), lr=hp.lr)
@@ -122,11 +120,11 @@ def run_model_train_test(
             print("Test phase:")
             prev_test_score = test_score
             model.eval()
-            test_score = test(test_env, hp.test_episodes, model, run_episode_fn)
+            test_score = evaluate_model(test_env, hp.test_episodes, model, run_episode_fn)
             test_scores.append(test_score)
             if test_score > prev_test_score:
-                save_model(model, f'{model_name}-{today}')
-                print("Model saved at episode: ", episode_i)
+                save_model(model, save_name)
+                print(f"Model saved as {save_name} at episode: {episode_i}")
             print("Test score: ", test_score)
 
             train_score = score / hp.log_interval
@@ -139,7 +137,4 @@ def run_model_train_test(
     env.close()
     test_env.close()
 
-    # Save data
-    save_data(np.array(train_scores), f'{model_name}-{today}-train_scores')
-    save_data(np.array(test_scores), f'{model_name}-{today}-test_scores')
     return train_scores, test_scores

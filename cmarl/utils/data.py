@@ -11,7 +11,7 @@ def load_model(model: nn.Module, name: str='model'):
     model.load_state_dict(torch.load(f'model/{name}.pth'))
     return model
 
-def has_today_model(name: str='model') -> bool:
+def is_model_found(name: str= 'model') -> bool:
     return os.path.exists(f'model/{name}.pth')
 
 def save_data(data: np.ndarray, name: str='data'):

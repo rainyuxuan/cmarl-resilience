@@ -3,10 +3,11 @@ import collections
 
 class TeamManager:
 
-    def __init__(self, agents: list[str]):
+    def __init__(self, agents: list[str], my_team: str = None):
         self.agents = agents
         self.teams = self.group_agents()
         self.terminated_agents = set()
+        self.my_team = my_team
 
     def get_teams(self) -> list[str]:
         """
@@ -16,12 +17,16 @@ class TeamManager:
         return list(self.teams.keys())
 
     def get_my_team(self):
+        if self.my_team is not None:
+            return self.my_team
         if 'tiger' in self.teams:
-            return 'tiger'
+            my_team = 'tiger'
         elif 'predator' in self.teams:
-            return 'predator'
+            my_team = 'predator'
         else:
-            return self.get_teams()[0]
+            my_team = self.get_teams()[0]
+        self.my_team = my_team
+        return my_team
 
     def get_team_agents(self, team: str) -> list[str]:
         """
@@ -31,6 +36,9 @@ class TeamManager:
         """
         assert team in self.teams, f"Team [{team}] not found."
         return self.teams[team]
+
+    def get_my_agents(self) -> list[str]:
+        return self.get_team_agents(self.get_my_team())
 
     def group_agents(self) -> dict[str, list[str]]:
         """

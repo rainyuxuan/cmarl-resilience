@@ -1,9 +1,6 @@
 import argparse
-import collections
-import datetime
 from typing import Optional
 
-from magent2.environments import adversarial_pursuit_v4
 from dataclasses import dataclass
 import numpy as np
 import torch
@@ -14,8 +11,8 @@ import gymnasium as gym
 import pettingzoo
 from tqdm import tqdm
 
-from cmarl.runner import Hyperparameters
-from cmarl.utils import compute_output_dim, reseed, save_model, load_model, has_today_model, today
+from cmarl.runner import Hyperparameters, run_model_train_test, evaluate_model
+from cmarl.utils import compute_output_dim, reseed, save_model, load_model, is_model_found, today, save_data
 from cmarl.utils.env import envs_config
 from cmarl.utils.team import TeamManager
 from cmarl.utils.buffer import ReplayBuffer
@@ -95,7 +92,7 @@ class QNet(nn.Module):
         :return: actions: [batch_size, num_agents], hidden: [batch_size, num_agents, hx_size]
         """
         q_values, hidden = self.forward(obs, hidden)    # [batch_size, num_agents, n_actions], [batch_size, num_agents, hx_size]
-        # epsilon-greedy action selection
+        # epsilon-greedy action selection: choose random action with epsilon probability
         mask = (torch.rand((q_values.shape[0],)) <= epsilon)     # [batch_size]
         actions = torch.empty((q_values.shape[0], q_values.shape[1],))     # [batch_size, num_agents]
         actions[mask] = torch.randint(0, q_values.shape[2], actions[mask].shape).float()
@@ -251,7 +248,7 @@ def main(
     test_score = 0
 
     # Load model if exists
-    if has_today_model(f'vdn-{today}'):
+    if is_model_found(f'vdn-{today}'):
         q_test = load_model(QNet(team_manager.get_team_agents(my_team), env.observation_spaces, env.action_spaces, recurrent), f'vdn-{today}')
         test_score = test(test_env, test_episodes, q_test)
         print("Model loaded. Test score: ", test_score)
@@ -295,30 +292,63 @@ if __name__ == '__main__':
     parser.add_argument('--max-episodes', type=int, default=160, required=False)
     parser.add_argument('--batch', type=int, default=2048, required=False)
     parser.add_argument('--env', type=str, default='adversarial_pursuit', required=False)
+    parser.add_argument('--load_model', type=str, default=f'vdn-{today}-sota', required=False)
+    parser.add_argument('--task', type=str, default='train', required=False, choices=['train', 'experiment'])
 
     # Process arguments
     args = parser.parse_args()
-    env = envs_config[args.env]
+    env_cfg = envs_config[args.env]
     max_episodes = args.max_episodes
     batch_size = args.batch
+    task = args.task
+    save_name = f'vdn-{args.env}-{today}'
 
-    kwargs = {
-        "env": env["module"].parallel_env(**env["args"]),
-        "test_env": env["module"].parallel_env(**env["args"]),
-        "lr": 0.001,
-        "batch_size": batch_size,
-        "gamma": 0.99,
-        "buffer_limit": 9000,
-        "update_target_interval": 10,
-        "log_interval": 10,
-        "max_episodes": max_episodes,
-        "max_epsilon": 0.9,
-        "min_epsilon": 0.1,
-        "test_episodes": 5,
-        "warm_up_steps": 3000,
-        "update_iter": 20,  # epochs
-        "chunk_size": 1,  # if not recurrent, internally, we use chunk_size of 1 and no gru cell is used.
-        "recurrent": False,
-    }
+    # Hyperparameters
+    hp = VdnHyperparameters(
+        lr=0.001,
+        gamma=0.99,
+        batch_size=batch_size,
+        buffer_limit=9000,
+        log_interval=20,
+        max_episodes=max_episodes,
+        max_epsilon=0.1,
+        min_epsilon=0.0,
+        test_episodes=5,
+        warm_up_steps=3000,
+        update_iter=20,
+        chunk_size=1,
+        update_target_interval=20
+    )
 
-    main(**kwargs)
+    # Create env
+    env = env_cfg["module"].parallel_env(**env_cfg["args"])
+    test_env = env_cfg["module"].parallel_env(**env_cfg["args"])
+    env.reset(seed=seed)
+    test_env.reset(seed=seed)
+    team_manager = TeamManager(env.agents)
+
+    # Create model
+    q = QNet(team_manager.get_my_agents(), env.observation_spaces, env.action_spaces)
+    q_target = QNet(team_manager.get_my_agents(), env.observation_spaces, env.action_spaces)
+
+    # Load model if exists
+    if args.load_model is not None and is_model_found(args.load_model):
+        q = load_model(q, args.load_model)
+        test_score = evaluate_model(test_env, hp.test_episodes, q, run_episode)
+        print("Pretrained Model loaded. Test score: ", test_score)
+
+    # Do task
+    if task == 'train':
+        # Train and test
+        train_scores, test_scores = run_model_train_test(
+            env, test_env, QNet, q, q_target,
+            save_name, team_manager, hp, train, run_episode
+        )
+
+        # Save data
+        save_data(np.array(train_scores), f'{save_name}-train_scores')
+        save_data(np.array(test_scores), f'{save_name}-test_scores')
+    elif task == 'experiment':
+        pass    # TODO: implement this
+
+
