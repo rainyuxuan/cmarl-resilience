@@ -14,70 +14,18 @@ import gymnasium as gym
 import pettingzoo
 from tqdm import tqdm
 
-from cmarl.utils import compute_output_dim, reseed, save_model, load_model, has_today_model
+from cmarl.utils import compute_output_dim, reseed, save_model, load_model, has_today_model, today
 from cmarl.utils.team import TeamManager
+from cmarl.utils.buffer import ReplayBuffer
 
 USE_WANDB = False  # if enabled, logs data on wandb server
 
 seed=42
-today = datetime.date.today()
+
 
 @dataclass
 class VdnHyperparameters:
     lr: float = 0.001
-
-
-class ReplayBuffer:
-    def __init__(self, buffer_limit):
-        self.buffer = collections.deque(maxlen=buffer_limit)
-
-    def put(self, transition: tuple):
-        """Update buffer with a new transition
-        :param transition: tuple of (state, action, reward, next_state, done)
-        """
-        self.buffer.append(transition)
-
-    def sample_chunk(self, batch_size, chunk_size) -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor):
-        """Sample a batch of chunk_size transitions from the buffer
-        :param batch_size: number of transitions to sample
-        :param chunk_size: length of horizon of each batch
-        :return: tuple of (states, actions, rewards, next_states, dones),
-        their shapes are respectively:
-        [batch_size, chunk_size, n_agents, ...obs_shape],
-        [batch_size, chunk_size, n_agents],
-        [batch_size, chunk_size, n_agents],
-        [batch_size, chunk_size, n_agents, ...obs_shape],
-        [batch_size, chunk_size, 1]
-        """
-        start_idx = np.random.randint(0, len(self.buffer) - chunk_size, batch_size)
-        s_lst, a_lst, r_lst, s_prime_lst, done_lst = [], [], [], [], []
-
-        for idx in start_idx:
-            for chunk_step in range(idx, idx + chunk_size):
-                # (state, action, reward, next_state, done) * num_agent
-                s, a, r, s_prime, done = self.buffer[chunk_step]
-                s_lst.append(s)
-                a_lst.append(a)
-                r_lst.append(r)
-                s_prime_lst.append(s_prime)
-                done_lst.append(done)
-        num_agents = len(s_lst[0])
-        obs_shape = s_lst[0][0].shape
-        s_lst = np.array(s_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape)
-        a_lst = np.array(a_lst).reshape(batch_size, chunk_size, num_agents)
-        r_lst = np.array(r_lst).reshape(batch_size, chunk_size, num_agents)
-        s_prime_lst = np.array(s_prime_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape)
-        done_lst = np.array(done_lst).reshape(batch_size, chunk_size, 1)
-        return (
-            torch.tensor(s_lst, dtype=torch.float32),
-            torch.tensor(a_lst, dtype=torch.float32),
-            torch.tensor(r_lst, dtype=torch.float32),
-            torch.tensor(s_prime_lst, dtype=torch.float32),
-            torch.tensor(done_lst, dtype=torch.float32)
-        )
-
-    def size(self):
-        return len(self.buffer)
 
 
 class QNet(nn.Module):
@@ -167,13 +115,13 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
         target_hidden = q_target.init_hidden(batch_size)
         loss = 0
         for step_i in range(chunk_size):
-            out: tuple[torch.Tensor, torch.Tensor] = q(states[:, step_i, :, :], hidden)  # [batch_size, num_agents, n_actions]
+            out: tuple[torch.Tensor, torch.Tensor] = q(states[:, step_i], hidden)  # [batch_size, num_agents, n_actions]
             q_out, hidden = out
             q_a = q_out.gather(2, actions[:, step_i, :].unsqueeze(-1).long()).squeeze(-1)   # [batch_size, num_agents]: q values of actions taken
             sum_q = q_a.sum(dim=1, keepdims=True)   # [batch_size, 1]
 
-            max_q_prime, target_hidden = q_target(next_states[:, step_i, :, :], target_hidden.detach())
-            max_q_prime = max_q_prime.max(dim=2)[0].squeeze(-1)
+            max_q_prime, target_hidden = q_target(next_states[:, step_i], target_hidden.detach())
+            max_q_prime = max_q_prime.max(dim=2)[0].squeeze(-1)  # [batch_size, num_agents]
             target_q = rewards[:, step_i, :].sum(dim=1, keepdims=True)  # [batch_size, 1]
             target_q += gamma * max_q_prime.sum(dim=1, keepdims=True) * (1 - dones[:, step_i])
 
@@ -190,9 +138,8 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
         torch.nn.utils.clip_grad_norm_(q.parameters(), grad_clip_norm, norm_type=2)
         optimizer.step()
 
-    print('Loss:', losses)
+    print('Loss:', losses[0], losses[-1])
     return losses
-
 
 
 def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuffer] = None, epsilon=0.1) -> float:
@@ -267,9 +214,10 @@ def test(env: pettingzoo.ParallelEnv, num_episodes: int, q: QNet):
     :return: average score over num_episodes
     """
     q.eval()
+    env.reset(seed=seed)
     score = 0
     for episode_i in range(num_episodes):
-        score += run_episode(env, q)
+        score += run_episode(env, q, epsilon=0)
     return score / num_episodes
 
 
@@ -278,11 +226,12 @@ def main(
         lr, gamma, batch_size, buffer_limit, log_interval, max_episodes, max_epsilon, min_epsilon,
         test_episodes, warm_up_steps, update_iter, chunk_size, update_target_interval, recurrent: bool = False
 ):
-    reseed(42)
+    reseed(seed)
     # create env.
     memory = ReplayBuffer(buffer_limit)
 
     # Setup env
+    test_env.reset(seed=seed)
     env.reset(seed=seed)
     team_manager = TeamManager(env.agents)
     my_team = team_manager.get_my_team()
@@ -301,6 +250,7 @@ def main(
     if has_today_model(f'vdn-{today}'):
         q_test = load_model(QNet(team_manager.get_team_agents(my_team), env.observation_spaces, env.action_spaces, recurrent), f'vdn-{today}')
         test_score = test(test_env, test_episodes, q_test)
+        print("Model loaded. Test score: ", test_score)
 
     # Train and test
     for episode_i in tqdm(range(max_episodes)):
@@ -315,16 +265,20 @@ def main(
             q_target.load_state_dict(q.state_dict())
 
         if (episode_i + 1) % log_interval == 0:
+            print("Test phase:")
             prev_test_score = test_score
             test_score = test(test_env, test_episodes, q)
             if test_score > prev_test_score:
                 save_model(q, f'vdn-{today}')
                 print("Model saved at episode: ", episode_i)
+            print("Test score: ", test_score)
+
 
             train_score = score / log_interval
             print("#{:<10}/{} episodes , avg train score : {:.1f}, test score: {:.1f} n_buffer : {}, eps : {:.1f}"
                   .format(episode_i, max_episodes, train_score, test_score, memory.size(), epsilon))
             score = 0
+            print('#' * 30)
 
     env.close()
     test_env.close()
@@ -348,7 +302,7 @@ if __name__ == '__main__':
         "test_env": adversarial_pursuit_v4.parallel_env(
             map_size=35, render_mode="human", max_cycles=1000, tag_penalty=0
         ),
-        "lr": 0.01,
+        "lr": 0.001,
         "batch_size": 32,
         "gamma": 0.99,
         "buffer_limit": 9000,

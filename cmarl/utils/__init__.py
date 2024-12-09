@@ -1,3 +1,4 @@
+import datetime
 import random
 
 from .data import *
@@ -14,3 +15,5 @@ def reseed(seed: int):
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+today = datetime.date.today()
