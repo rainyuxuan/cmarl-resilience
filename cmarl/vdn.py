@@ -14,7 +14,9 @@ import gymnasium as gym
 import pettingzoo
 from tqdm import tqdm
 
+from cmarl.runner import Hyperparameters
 from cmarl.utils import compute_output_dim, reseed, save_model, load_model, has_today_model, today
+from cmarl.utils.env import envs_config
 from cmarl.utils.team import TeamManager
 from cmarl.utils.buffer import ReplayBuffer
 
@@ -24,11 +26,13 @@ seed=42
 
 
 @dataclass
-class VdnHyperparameters:
+class VdnHyperparameters(Hyperparameters):
     lr: float = 0.001
 
 
 class QNet(nn.Module):
+    model_name  = "VDN"
+
     def __init__(self, agents: list[str], observation_spaces: dict[str, gym.spaces.Space], action_spaces: dict[str, gym.spaces.Space], recurrent=False):
         super(QNet, self).__init__()
         self.agents = agents
@@ -259,12 +263,13 @@ def main(
         score += run_episode(env, q, memory, epsilon)
 
         if memory.size() > warm_up_steps:
+            print("Training phase:")
             train(q, q_target, memory, optimizer, gamma, batch_size, update_iter, chunk_size)
 
         if episode_i % update_target_interval:
             q_target.load_state_dict(q.state_dict())
 
-        if (episode_i + 1) % log_interval == 0:
+        if episode_i % log_interval == 0 and episode_i > 0:
             print("Test phase:")
             prev_test_score = test_score
             test_score = test(test_env, test_episodes, q)
@@ -287,28 +292,26 @@ def main(
 if __name__ == '__main__':
     # Lets gather arguments
     parser = argparse.ArgumentParser(description='Value Decomposition Network (VDN)')
-    parser.add_argument('--env-name', required=False, default='ma_gym:Checkers-v0')
-    parser.add_argument('--seed', type=int, default=42, required=False)
-    parser.add_argument('--no-recurrent', action='store_true')
-    parser.add_argument('--max-episodes', type=int, default=150, required=False)
+    parser.add_argument('--max-episodes', type=int, default=160, required=False)
+    parser.add_argument('--batch', type=int, default=2048, required=False)
+    parser.add_argument('--env', type=str, default='adversarial_pursuit', required=False)
 
     # Process arguments
     args = parser.parse_args()
+    env = envs_config[args.env]
+    max_episodes = args.max_episodes
+    batch_size = args.batch
 
     kwargs = {
-        "env": adversarial_pursuit_v4.parallel_env(
-            map_size=35, render_mode="human", max_cycles=1000, tag_penalty=0
-        ),
-        "test_env": adversarial_pursuit_v4.parallel_env(
-            map_size=35, render_mode="human", max_cycles=1000, tag_penalty=0
-        ),
+        "env": env["module"].parallel_env(**env["args"]),
+        "test_env": env["module"].parallel_env(**env["args"]),
         "lr": 0.001,
-        "batch_size": 32,
+        "batch_size": batch_size,
         "gamma": 0.99,
         "buffer_limit": 9000,
         "update_target_interval": 10,
         "log_interval": 10,
-        "max_episodes": args.max_episodes,
+        "max_episodes": max_episodes,
         "max_epsilon": 0.9,
         "min_epsilon": 0.1,
         "test_episodes": 5,

@@ -19,6 +19,8 @@ from cmarl.utils.env import envs_config
 seed = 42
 
 class QNet(nn.Module):
+    model_name = 'IDQN'
+
     def __init__(self, observation_space: gym.spaces.Space, action_space: gym.spaces.Space):
         super(QNet, self).__init__()
         self.hx_size = 32  # latent repr size
@@ -45,9 +47,9 @@ class QNet(nn.Module):
             nn.MaxPool2d(kernel_size=pool_kernel_size, stride=pool_stride),
             nn.Flatten(),
             nn.Linear(flattened_size, self.hx_size),
-            nn.ReLU(),
-            nn.Linear(self.hx_size, self.n_act)
+            nn.ReLU()
         )
+        self.q_val = nn.Linear(self.hx_size, self.n_act)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """
@@ -56,7 +58,8 @@ class QNet(nn.Module):
         :return: shape (batch_size, n_act)
         """
         obs = obs.permute(0, 3, 1, 2)
-        return self.feature_cnn(obs)    # (batch_size, n_act)
+        hx = self.feature_cnn(obs)
+        return self.q_val(hx)
 
     def sample_action(self, obs: torch.Tensor, epsilon: float):
         """
