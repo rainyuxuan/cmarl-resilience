@@ -9,29 +9,23 @@ import torch.nn.functional as F
 import torch.optim as optim
 import gymnasium as gym
 import pettingzoo
-from tqdm import tqdm
 
-from cmarl.runner import Hyperparameters, run_model_train_test, evaluate_model
-from cmarl.utils import compute_output_dim, reseed, save_model, load_model, is_model_found, today, save_data
+from cmarl.runner import Hyperparameters, run_model_train_test, evaluate_model, seed, run_experiment
+from cmarl.utils import compute_output_dim, load_model, is_model_found, today, save_data, save_dict
 from cmarl.utils.env import envs_config
 from cmarl.utils.team import TeamManager
 from cmarl.utils.buffer import ReplayBuffer
 
-USE_WANDB = False  # if enabled, logs data on wandb server
-
-seed=42
-
-
 @dataclass
 class VdnHyperparameters(Hyperparameters):
-    lr: float = 0.001
+    recurrent: bool = False
 
 
-class QNet(nn.Module):
+class VdnQNet(nn.Module):
     model_name  = "VDN"
 
     def __init__(self, agents: list[str], observation_spaces: dict[str, gym.spaces.Space], action_spaces: dict[str, gym.spaces.Space], recurrent=False):
-        super(QNet, self).__init__()
+        super(VdnQNet, self).__init__()
         self.agents = agents
         self.num_agents = len(agents)
         self.recurrent = recurrent
@@ -70,6 +64,7 @@ class QNet(nn.Module):
         :param hidden: [batch_size, num_agents, hx_size]
         :return: q_values: [batch_size, num_agents, n_actions], hidden: [batch_size, num_agents, hx_size]
         """
+        # TODO: need to have a done_mask param
         batch_size = obs.shape[0]
         q_values = torch.empty((batch_size, self.num_agents, self.n_act))
         next_hidden = torch.empty((batch_size, self.num_agents, self.hx_size))
@@ -91,6 +86,7 @@ class QNet(nn.Module):
         :param epsilon: exploration rate
         :return: actions: [batch_size, num_agents], hidden: [batch_size, num_agents, hx_size]
         """
+        # TODO: need to have a done_mask param
         q_values, hidden = self.forward(obs, hidden)    # [batch_size, num_agents, n_actions], [batch_size, num_agents, hx_size]
         # epsilon-greedy action selection: choose random action with epsilon probability
         mask = (torch.rand((q_values.shape[0],)) <= epsilon)     # [batch_size]
@@ -103,7 +99,7 @@ class QNet(nn.Module):
         return torch.zeros((batch_size, self.num_agents, self.hx_size))
 
 
-def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimizer, gamma: float, batch_size: int, update_iter=10, chunk_size=10, grad_clip_norm=5):
+def train(q: VdnQNet, q_target: VdnQNet, memory: ReplayBuffer, optimizer: optim.Optimizer, gamma: float, batch_size: int, update_iter=10, chunk_size=10, grad_clip_norm=5):
     q.train()
     q_target.eval()
     chunk_size = chunk_size if q.recurrent else 1
@@ -116,6 +112,7 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
         target_hidden = q_target.init_hidden(batch_size)
         loss = 0
         for step_i in range(chunk_size):
+            # TODO: Pick states and hiddens for non-terminated agents
             out: tuple[torch.Tensor, torch.Tensor] = q(states[:, step_i], hidden)  # [batch_size, num_agents, n_actions]
             q_out, hidden = out
             q_a = q_out.gather(2, actions[:, step_i, :].unsqueeze(-1).long()).squeeze(-1)   # [batch_size, num_agents]: q values of actions taken
@@ -143,12 +140,11 @@ def train(q: QNet, q_target: QNet, memory: ReplayBuffer, optimizer: optim.Optimi
     return losses
 
 
-def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuffer] = None, epsilon=0.1) -> float:
+def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[ReplayBuffer] = None, random_rate: float=0, epsilon: float=0.1) -> float:
     """Run an episode in the environment
     :return: total score of the episode
     """
-    reseed(42)
-    observations: dict[str, np.ndarray] = env.reset(seed=seed)
+    observations: dict[str, np.ndarray] = env.reset()
     team_manager = TeamManager(env.agents)
     teams = team_manager.get_teams()
     my_team = team_manager.get_my_team()
@@ -166,7 +162,7 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
                     my_team_observations[agent]
                     for agent in team_manager.get_team_agents(team)
                 ])).unsqueeze(0)    # [batch_size=1, num_agents, n_obs]
-                # team_hidden = team_manager.get_info_of_team(team, hidden) TODO: we need a mapping from agent to index
+                # TODO: team_hidden = team_manager.get_info_of_team(team, hidden)
                 actions, team_hiddens = q.sample_action(team_observations, hidden, epsilon)
                 team_actions = {
                     agent: action
@@ -174,6 +170,13 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
                         my_team_observations.keys(), actions.squeeze(0).data.numpy().tolist()
                     )
                 }
+
+                ##############################
+                #  Random agents Experiment  #
+                ##############################
+                if random_rate > 0:
+                    for agent in team_manager.get_random_agents(random_rate):
+                        team_actions[agent] = env.action_space(agent).sample()
             else:
                 # TODO: selfplay
                 # Opponents choose random actions
@@ -194,7 +197,7 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
                 list(team_manager.get_info_of_team(my_team, agent_actions).values()),
                 list(team_manager.get_info_of_team(my_team, agent_rewards, 0).values()),
                 list(team_manager.get_info_of_team(my_team, observations).values()),
-                [int(team_manager.has_terminated_teams())]
+                [int(team_manager.has_terminated_teams())]  # TODO: Update done mask for each agent
             ))
 
         # Check for termination
@@ -207,84 +210,6 @@ def run_episode(env: pettingzoo.ParallelEnv, q: QNet, memory: Optional[ReplayBuf
     print('Score:', score)
     return score
 
-def test(env: pettingzoo.ParallelEnv, num_episodes: int, q: QNet):
-    """
-    :param env: Environment
-    :param num_episodes: How many episodes to test
-    :param q: Trained QNet
-    :return: average score over num_episodes
-    """
-    q.eval()
-    env.reset(seed=seed)
-    score = 0
-    for episode_i in range(num_episodes):
-        score += run_episode(env, q, epsilon=0)
-    return score / num_episodes
-
-
-def main(
-        env: pettingzoo.ParallelEnv, test_env: pettingzoo.ParallelEnv,
-        lr, gamma, batch_size, buffer_limit, log_interval, max_episodes, max_epsilon, min_epsilon,
-        test_episodes, warm_up_steps, update_iter, chunk_size, update_target_interval, recurrent: bool = False
-):
-    reseed(seed)
-    # create env.
-    memory = ReplayBuffer(buffer_limit)
-
-    # Setup env
-    test_env.reset(seed=seed)
-    env.reset(seed=seed)
-    team_manager = TeamManager(env.agents)
-    my_team = team_manager.get_my_team()
-    print(my_team)
-
-    # create networks
-    q = QNet(team_manager.get_team_agents(my_team), env.observation_spaces, env.action_spaces, recurrent)
-    q_target = QNet(team_manager.get_team_agents(my_team), env.observation_spaces, env.action_spaces, recurrent)
-    q_target.load_state_dict(q.state_dict())
-    optimizer = optim.Adam(q.parameters(), lr=lr)
-
-    score = 0
-    test_score = 0
-
-    # Load model if exists
-    if is_model_found(f'vdn-{today}'):
-        q_test = load_model(QNet(team_manager.get_team_agents(my_team), env.observation_spaces, env.action_spaces, recurrent), f'vdn-{today}')
-        test_score = test(test_env, test_episodes, q_test)
-        print("Model loaded. Test score: ", test_score)
-
-    # Train and test
-    for episode_i in tqdm(range(max_episodes)):
-        epsilon = max(min_epsilon, max_epsilon - (max_epsilon - min_epsilon) * (episode_i / (0.6 * max_episodes)))
-        q.eval()
-        score += run_episode(env, q, memory, epsilon)
-
-        if memory.size() > warm_up_steps:
-            print("Training phase:")
-            train(q, q_target, memory, optimizer, gamma, batch_size, update_iter, chunk_size)
-
-        if episode_i % update_target_interval:
-            q_target.load_state_dict(q.state_dict())
-
-        if episode_i % log_interval == 0 and episode_i > 0:
-            print("Test phase:")
-            prev_test_score = test_score
-            test_score = test(test_env, test_episodes, q)
-            if test_score > prev_test_score:
-                save_model(q, f'vdn-{today}')
-                print("Model saved at episode: ", episode_i)
-            print("Test score: ", test_score)
-
-
-            train_score = score / log_interval
-            print("#{:<10}/{} episodes , avg train score : {:.1f}, test score: {:.1f} n_buffer : {}, eps : {:.1f}"
-                  .format(episode_i, max_episodes, train_score, test_score, memory.size(), epsilon))
-            score = 0
-            print('#' * 30)
-
-    env.close()
-    test_env.close()
-
 
 if __name__ == '__main__':
     # Lets gather arguments
@@ -292,8 +217,8 @@ if __name__ == '__main__':
     parser.add_argument('--max-episodes', type=int, default=160, required=False)
     parser.add_argument('--batch', type=int, default=2048, required=False)
     parser.add_argument('--env', type=str, default='adversarial_pursuit', required=False)
-    parser.add_argument('--load_model', type=str, default=f'vdn-{today}-sota', required=False)
-    parser.add_argument('--task', type=str, default='train', required=False, choices=['train', 'experiment'])
+    parser.add_argument('--load_model', type=str, default='vdn-2024-12-09-sota', required=False)
+    parser.add_argument('--task', type=str, default='experiment', required=False, choices=['train', 'experiment'])
 
     # Process arguments
     args = parser.parse_args()
@@ -302,6 +227,7 @@ if __name__ == '__main__':
     batch_size = args.batch
     task = args.task
     save_name = f'vdn-{args.env}-{today}'
+    loaded_model = 'vdn-2024-12-09-sota' # args.load_model
 
     # Hyperparameters
     hp = VdnHyperparameters(
@@ -328,20 +254,20 @@ if __name__ == '__main__':
     team_manager = TeamManager(env.agents)
 
     # Create model
-    q = QNet(team_manager.get_my_agents(), env.observation_spaces, env.action_spaces)
-    q_target = QNet(team_manager.get_my_agents(), env.observation_spaces, env.action_spaces)
-
-    # Load model if exists
-    if args.load_model is not None and is_model_found(args.load_model):
-        q = load_model(q, args.load_model)
-        test_score = evaluate_model(test_env, hp.test_episodes, q, run_episode)
-        print("Pretrained Model loaded. Test score: ", test_score)
+    q = VdnQNet(team_manager.get_my_agents(), env.observation_spaces, env.action_spaces)
+    q_target = VdnQNet(team_manager.get_my_agents(), env.observation_spaces, env.action_spaces)
 
     # Do task
     if task == 'train':
+        # Load model if exists
+        if loaded_model is not None and is_model_found(loaded_model):
+            q = load_model(q, loaded_model)
+            test_score = evaluate_model(test_env, hp.test_episodes, q, run_episode)
+            print("Pretrained Model loaded. Test score: ", test_score)
+
         # Train and test
         train_scores, test_scores = run_model_train_test(
-            env, test_env, QNet, q, q_target,
+            env, test_env, VdnQNet, q, q_target,
             save_name, team_manager, hp, train, run_episode
         )
 
@@ -349,6 +275,18 @@ if __name__ == '__main__':
         save_data(np.array(train_scores), f'{save_name}-train_scores')
         save_data(np.array(test_scores), f'{save_name}-test_scores')
     elif task == 'experiment':
-        pass    # TODO: implement this
+        if loaded_model is None or not is_model_found(loaded_model):
+            raise ValueError("Please provide a model to load for experiment.")
+
+        q = load_model(q, loaded_model)
+
+        # Run experiment
+        rate_avg_scores, rate_scores = run_experiment(
+            env, q, hp.test_episodes * 4, run_episode, num_tests=10
+        )
+
+        # Save data
+        save_dict(rate_avg_scores, f'{save_name}-rate_avg_scores')
+        save_dict(rate_scores, f'{save_name}-rate_scores')
 
 

@@ -1,3 +1,4 @@
+from collections import defaultdict
 from dataclasses import dataclass
 
 import numpy as np
@@ -28,18 +29,39 @@ class Hyperparameters:
     chunk_size: int = 1
 
 
-def experiment(env: pettingzoo.ParallelEnv, test_env: pettingzoo.ParallelEnv, model: nn.Module, hp: Hyperparameters,
-                run_episode_fn: callable):
-    pass
+def run_experiment(
+        env: pettingzoo.ParallelEnv, model: nn.Module,
+        eval_iter: int,
+        run_test_episode_fn: callable,
+        random_agent_min_rate: float = 0.0,
+        random_agent_max_rate: float = 0.8,
+        num_tests: int = 10,
+) -> tuple[dict, dict]:
+    reseed(seed)
+    random_rates = np.linspace(random_agent_min_rate, random_agent_max_rate, num_tests)
+    rate_avg_scores = {}
+    rate_scores = {}
+    for rate in tqdm(random_rates):
+        print(f"Testing with random rate: {rate}")
+        env.reset(seed=seed)
 
-
+        rate_scores[rate] = []
+        for iter in range(eval_iter):
+            env.reset()
+            test_score = run_test_episode_fn(env, model, random_rate=rate, epsilon=0)
+            rate_scores[rate].append(test_score)
+        rate_avg_scores[rate] = np.mean(rate_scores[rate])
+        print(f"Average score for random_rate={rate}: {rate_avg_scores[rate]}")
+    return rate_avg_scores, rate_scores
 
 
 def evaluate_model(env: pettingzoo.ParallelEnv, num_episodes: int, model: nn.Module, run_episode_fn: callable):
     """
+
     :param env: Environment
     :param num_episodes: How many episodes to test
     :param model: Trained model
+    :param run_episode_fn: function to run an episode
     :return: average score over num_episodes
     """
     model.eval()
@@ -103,7 +125,7 @@ def run_model_train_test(
         epsilon = max(hp.min_epsilon,
                       hp.max_epsilon - (hp.max_epsilon - hp.min_epsilon) * (episode_i / (0.6 * hp.max_episodes)))
         model.eval()
-        score += run_episode_fn(env, model, memory, epsilon)
+        score += run_episode_fn(env, model, memory, epsilon=epsilon)
 
         # Train
         if memory.size() > hp.warm_up_steps:

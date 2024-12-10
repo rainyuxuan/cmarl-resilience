@@ -1,4 +1,5 @@
 import collections
+import random
 
 
 class TeamManager:
@@ -8,6 +9,8 @@ class TeamManager:
         self.teams = self.group_agents()
         self.terminated_agents = set()
         self.my_team = my_team
+        self.random_agents = None
+        self.get_random_agents(1)
 
     def get_teams(self) -> list[str]:
         """
@@ -96,3 +99,17 @@ class TeamManager:
             if self.is_team_terminated(team):
                 return True
         return False
+
+    def get_random_agents(self, rate: float):
+        """
+        Create a random agent list, and return the first n agents.
+        :param rate: the rate of random agents to return
+        :return: a list of random agents with the length of rate * num_agents
+        """
+        num_agents = len(self.agents)
+        if self.random_agents is not None:
+            num_random_agents = int(num_agents * rate)
+            return self.random_agents[:num_random_agents]
+        else:
+            self.random_agents = random.sample(self.agents, len(self.agents))
+            return self.get_random_agents(rate)
