@@ -1,5 +1,7 @@
+import argparse
 import collections
 import random
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -10,13 +12,20 @@ import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 
-from cmarl.utils import compute_output_dim, reseed, TeamManager, is_model_found, today, load_model, save_model
+from cmarl.runner import Hyperparameters, evaluate_model, run_model_train_test, run_experiment
+from cmarl.utils import compute_output_dim, reseed, TeamManager, is_model_found, today, load_model, save_model, \
+    save_data, save_dict
 from cmarl.utils.buffer import ReplayBuffer
 import gymnasium as gym
 
 from cmarl.utils.env import envs_config
 
 seed = 42
+
+@dataclass
+class IdqnHyperparameters(Hyperparameters):
+    chunk_size = 1
+
 
 class IqdnQNet(nn.Module):
     model_name = 'IDQN'
@@ -74,7 +83,7 @@ class IqdnQNet(nn.Module):
             return self.forward(obs).argmax(dim=1)
 
 
-def run_episode(env: pettingzoo.ParallelEnv, q: IqdnQNet, memory: Optional[ReplayBuffer]=None, epsilon: float=0):
+def run_episode(env: pettingzoo.ParallelEnv, q: IqdnQNet, memory: Optional[ReplayBuffer]=None, epsilon: float=0, random_rate: float=0.0):
     observations: dict[str, np.ndarray] = env.reset()
     team_manager = TeamManager(env.agents)
     teams = team_manager.get_teams()
@@ -96,6 +105,11 @@ def run_episode(env: pettingzoo.ParallelEnv, q: IqdnQNet, memory: Optional[Repla
                     agent: q.sample_action(team_observations[:, i], epsilon).item()
                     for i, agent in enumerate(team_manager.get_team_agents(team))
                 }
+
+                if random_rate > 0:
+                    random_agents = team_manager.get_random_agents(random_rate)
+                    for agent in random_agents:
+                        team_actions[agent] = env.action_space(agent).sample()
             else:
                 # Opponents choose random actions
                 team_actions = {agent: env.action_space(agent).sample() for agent in team_manager.get_team_agents(team)}
@@ -129,7 +143,7 @@ def run_episode(env: pettingzoo.ParallelEnv, q: IqdnQNet, memory: Optional[Repla
     return score
 
 
-def train(q, q_target, memory, optimizer, gamma, batch_size, update_iter=10):
+def train(q, q_target, memory, optimizer, gamma, batch_size, update_iter=10, chunk_size=1):
     q.train()
     q_target.eval()
     chunk_size = 1
@@ -157,96 +171,80 @@ def train(q, q_target, memory, optimizer, gamma, batch_size, update_iter=10):
     return np.mean(losses, axis=1)
 
 
-def test(env: pettingzoo.ParallelEnv, num_episodes: int, q: IqdnQNet):
-    """
-    :param env: Environment
-    :param num_episodes: How many episodes to test
-    :param q: Trained QNet
-    :return: average score over num_episodes
-    """
-    q.eval()
-    score = 0
-    for episode_i in range(num_episodes):
-        score += run_episode(env, q, epsilon=0)
-    return score / num_episodes
+if __name__ == '__main__':
+    # Lets gather arguments
+    parser = argparse.ArgumentParser(description='Independent Deep Q-Network (IDQN)')
+    parser.add_argument('--max-episodes', type=int, default=160, required=False)
+    parser.add_argument('--batch', type=int, default=2048, required=False)
+    parser.add_argument('--env', type=str, default='adversarial_pursuit', required=False)
+    parser.add_argument('--load_model', type=str, default=None, required=False)
+    parser.add_argument('--task', type=str, default='train', required=False, choices=['train', 'experiment'])
 
+    # Process arguments
+    args = parser.parse_args()
+    env_cfg = envs_config[args.env]
+    max_episodes = args.max_episodes
+    batch_size = args.batch
+    task = args.task
+    save_name = f'idqn-{args.env}-{today}'
+    loaded_model = args.load_model
 
-def main(
-    env: pettingzoo.ParallelEnv, test_env: pettingzoo.ParallelEnv,
-    lr, gamma, batch_size, buffer_limit, log_interval, max_episodes,
-    max_epsilon, min_epsilon, test_episodes, warm_up_steps, update_iter
-):
-    reseed(seed)
-    # create env.
-    memory = ReplayBuffer(buffer_limit)
+    # Hyperparameters
+    hp = IdqnHyperparameters(
+        lr=0.001,
+        gamma=0.99,
+        batch_size=batch_size,
+        buffer_limit=9000,
+        log_interval=20,
+        max_episodes=max_episodes,
+        max_epsilon=0.1,
+        min_epsilon=0.0,
+        test_episodes=5,
+        warm_up_steps=3000,
+        update_iter=20,
+        update_target_interval=20
+    )
 
-    # Setup env
-    test_env.reset(seed=seed)
+    # Create env
+    env = env_cfg["module"].parallel_env(**env_cfg["args"])
+    test_env = env_cfg["module"].parallel_env(**env_cfg["args"])
     env.reset(seed=seed)
+    test_env.reset(seed=seed)
     team_manager = TeamManager(env.agents)
-    my_team = team_manager.get_my_team()
-    print(my_team)
 
-    # create networks
-    any_agent = team_manager.get_team_agents(my_team)[0]
+    # Create model
+    any_agent = team_manager.get_my_agents()[0]
     q = IqdnQNet(env.observation_spaces[any_agent], env.action_spaces[any_agent])
     q_target = IqdnQNet(env.observation_spaces[any_agent], env.action_spaces[any_agent])
-    q_target.load_state_dict(q.state_dict())
-    optimizer = optim.Adam(q.parameters(), lr=lr)
 
-    # Load model if exists
-    test_score = 0
-    if is_model_found(f'idqn-{today}'):
-        q_test = load_model(
-            IqdnQNet(env.observation_spaces[any_agent], env.action_spaces[any_agent]),
-            f'idqn-{today}')
-        test_score = test(test_env, test_episodes, q_test)
-        print("Model loaded. Test score: ", test_score)
+    # Do task
+    if task == 'train':
+        # Load model if exists
+        if loaded_model is not None and is_model_found(loaded_model):
+            q = load_model(q, loaded_model)
+            test_score = evaluate_model(test_env, hp.test_episodes, q, run_episode)
+            print("Pretrained Model loaded. Test score: ", test_score)
 
-    score = 0
-    for episode_i in tqdm(range(max_episodes)):
-        epsilon = max(min_epsilon, max_epsilon - (max_epsilon - min_epsilon) * (episode_i / (0.6 * max_episodes)))
-        q.eval()
-        score += run_episode(env, q, memory, epsilon)
+        # Train and test
+        train_scores, test_scores = run_model_train_test(
+            env, test_env, IqdnQNet, q, q_target,
+            save_name, team_manager, hp, train, run_episode
+        )
 
-        if memory.size() > warm_up_steps:
-            train(q, q_target, memory, optimizer, gamma, batch_size, update_iter)
+        # Save data
+        save_data(np.array(train_scores), f'{save_name}-train_scores')
+        save_data(np.array(test_scores), f'{save_name}-test_scores')
+    elif task == 'experiment':
+        if loaded_model is None or not is_model_found(loaded_model):
+            raise ValueError("Please provide a model to load for experiment.")
 
-        if (episode_i + 1) % log_interval == 0:
-            q_target.load_state_dict(q.state_dict())
-            print("Test phase:")
-            prev_test_score = test_score
-            test_score = test(test_env, test_episodes, q)
-            if test_score > prev_test_score:
-                save_model(q, f'idqn-{today}')
-                print("Model saved at episode: ", episode_i)
-            print("Test score: ", test_score)
+        q = load_model(q, loaded_model)
 
-            train_score = score / log_interval
-            print("#{:<10}/{} episodes , avg train score : {:.1f}, test score: {:.1f} n_buffer : {}, eps : {:.1f}"
-                  .format(episode_i, max_episodes, train_score, test_score, memory.size(), epsilon))
-            score = 0
-            print('#' * 30)
+        # Run experiment
+        rate_avg_scores, rate_scores = run_experiment(
+            env, q, hp.test_episodes * 4, run_episode, num_tests=10
+        )
 
-    env.close()
-    test_env.close()
-
-
-if __name__ == '__main__':
-    env = envs_config['adversarial_pursuit']
-    kwargs = {
-        "env": env["module"].parallel_env(**env["args"]),
-        "test_env": env["module"].parallel_env(**env["args"]),
-        "lr": 0.001,
-        "batch_size": 32,
-        "gamma": 0.99,
-        "buffer_limit": 9000,
-        "log_interval": 10,
-        "max_episodes": 150,
-        'max_epsilon': 0.9,
-        'min_epsilon': 0.1,
-        'test_episodes': 5,
-        "warm_up_steps": 3000,
-        "update_iter": 20,  # epochs
-    }
-    main(**kwargs)
+        # Save data
+        save_dict(rate_avg_scores, f'{save_name}-rate_avg_scores')
+        save_dict(rate_scores, f'{save_name}-rate_scores')

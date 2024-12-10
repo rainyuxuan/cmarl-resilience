@@ -227,7 +227,7 @@ if __name__ == '__main__':
     batch_size = args.batch
     task = args.task
     save_name = f'vdn-{args.env}-{today}'
-    loaded_model = 'vdn-2024-12-09-sota' # args.load_model
+    loaded_model = args.load_model
 
     # Hyperparameters
     hp = VdnHyperparameters(
