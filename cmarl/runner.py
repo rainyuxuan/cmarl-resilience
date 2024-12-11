@@ -82,6 +82,8 @@ def run_model_train_test(
         hp: Hyperparameters,
         train_fn: callable,
         run_episode_fn: callable,
+        mix_net: nn.Module = None,
+        mix_net_target: nn.Module = None,
 ) -> (list[float], list[float]):
     """
     Run training and testing loop of a model
@@ -112,6 +114,8 @@ def run_model_train_test(
 
     # Load target model
     target_model.load_state_dict(model.state_dict())
+    if mix_net is not None:
+        mix_net_target.load_state_dict(mix_net.state_dict())
 
     score = 0
     test_score = 0
@@ -121,6 +125,9 @@ def run_model_train_test(
 
     # Train and test
     optimizer = optim.Adam(model.parameters(), lr=hp.lr)
+    if mix_net is not None:
+        optimizer = optim.Adam([{'params': model.parameters()}, {'params': mix_net.parameters()}], lr=hp.lr)
+
     for episode_i in tqdm(range(hp.max_episodes)):
         # Collect data
         epsilon = max(hp.min_epsilon,
@@ -132,14 +139,24 @@ def run_model_train_test(
         if memory.size() > hp.warm_up_steps:
             print("Training phase:")
             model.train()
-            episode_losses = train_fn(
-                model, target_model, memory, optimizer,
-                hp.gamma, hp.batch_size, hp.update_iter, hp.chunk_size
-            )
+
+            if mix_net is not None:
+                mix_net.train()
+                episode_losses = train_fn(
+                    model, target_model, mix_net, mix_net_target, memory, optimizer,
+                    hp.gamma, hp.batch_size, hp.update_iter, hp.chunk_size
+                )
+            else:
+                episode_losses = train_fn(
+                    model, target_model, memory, optimizer,
+                    hp.gamma, hp.batch_size, hp.update_iter, hp.chunk_size
+                )
             losses.append(episode_losses)
 
         if episode_i % hp.update_target_interval == 0 and episode_i > 0:
             target_model.load_state_dict(model.state_dict())
+            if mix_net is not None:
+                mix_net_target.load_state_dict(mix_net.state_dict())
 
         # Test
         if ((episode_i == hp.max_episodes - 1)  # last episode
