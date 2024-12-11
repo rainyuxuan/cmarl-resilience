@@ -34,8 +34,8 @@ def run_experiment(
         eval_iter: int,
         run_test_episode_fn: callable,
         random_agent_min_rate: float = 0.0,
-        random_agent_max_rate: float = 0.8,
-        num_tests: int = 10,
+        random_agent_max_rate: float = 1.0,
+        num_tests: int = 16,
 ) -> tuple[dict, dict]:
     reseed(seed)
     random_rates = np.linspace(random_agent_min_rate, random_agent_max_rate, num_tests)
@@ -117,6 +117,7 @@ def run_model_train_test(
     test_score = 0
     train_scores = []
     test_scores = []
+    losses: list[list[float]] = []
 
     # Train and test
     optimizer = optim.Adam(model.parameters(), lr=hp.lr)
@@ -131,7 +132,11 @@ def run_model_train_test(
         if memory.size() > hp.warm_up_steps:
             print("Training phase:")
             model.train()
-            train_fn(model, target_model, memory, optimizer, hp.gamma, hp.batch_size, hp.update_iter, hp.chunk_size)
+            episode_losses = train_fn(
+                model, target_model, memory, optimizer,
+                hp.gamma, hp.batch_size, hp.update_iter, hp.chunk_size
+            )
+            losses.append(episode_losses)
 
         if episode_i % hp.update_target_interval == 0 and episode_i > 0:
             target_model.load_state_dict(model.state_dict())
@@ -159,4 +164,4 @@ def run_model_train_test(
     env.close()
     test_env.close()
 
-    return train_scores, test_scores
+    return train_scores, test_scores, losses

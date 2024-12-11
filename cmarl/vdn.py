@@ -34,7 +34,7 @@ class VdnQNet(nn.Module):
         self.n_act = action_spaces[agents[0]].n  # action space size of agents
 
         stride1, stride2 = 1, 1
-        padding1, padding2 = 0, 0
+        padding1, padding2 = 1, 1
         kernel_size1, kernel_size2 = 3, 3
         pool_kernel_size, pool_stride = 2, 2
 
@@ -191,6 +191,10 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
         observations, agent_rewards, agent_terminations, agent_truncations, agent_infos = env.step(agent_actions)
         score += sum(team_manager.get_info_of_team(my_team, agent_rewards, 0).values())
 
+        # Special rewards for tiger_deer_v4
+        if env.metadata['name'] == 'tiger_deer_v4':
+            score -= sum(team_manager.get_info_of_team('deer', agent_rewards, 0).values())
+
         if memory is not None:
             memory.put((
                 list(my_team_observations.values()),
@@ -217,8 +221,8 @@ if __name__ == '__main__':
     parser.add_argument('--max-episodes', type=int, default=160, required=False)
     parser.add_argument('--batch', type=int, default=2048, required=False)
     parser.add_argument('--env', type=str, default='adversarial_pursuit', required=False)
-    parser.add_argument('--load_model', type=str, default='vdn-2024-12-09-sota', required=False)
-    parser.add_argument('--task', type=str, default='experiment', required=False, choices=['train', 'experiment'])
+    parser.add_argument('--load_model', type=str, default=None, required=False)
+    parser.add_argument('--task', type=str, default='train', required=False, choices=['train', 'experiment'])
 
     # Process arguments
     args = parser.parse_args()
@@ -235,10 +239,10 @@ if __name__ == '__main__':
         gamma=0.99,
         batch_size=batch_size,
         buffer_limit=9000,
-        log_interval=20,
+        log_interval=10,
         max_episodes=max_episodes,
-        max_epsilon=0.1,
-        min_epsilon=0.0,
+        max_epsilon=0.9,
+        min_epsilon=0.1,
         test_episodes=5,
         warm_up_steps=3000,
         update_iter=20,
@@ -266,7 +270,7 @@ if __name__ == '__main__':
             print("Pretrained Model loaded. Test score: ", test_score)
 
         # Train and test
-        train_scores, test_scores = run_model_train_test(
+        train_scores, test_scores, losses = run_model_train_test(
             env, test_env, VdnQNet, q, q_target,
             save_name, team_manager, hp, train, run_episode
         )
@@ -274,6 +278,7 @@ if __name__ == '__main__':
         # Save data
         save_data(np.array(train_scores), f'{save_name}-train_scores')
         save_data(np.array(test_scores), f'{save_name}-test_scores')
+        save_data(np.array(losses), f'{save_name}-losses')
     elif task == 'experiment':
         if loaded_model is None or not is_model_found(loaded_model):
             raise ValueError("Please provide a model to load for experiment.")
@@ -282,7 +287,7 @@ if __name__ == '__main__':
 
         # Run experiment
         rate_avg_scores, rate_scores = run_experiment(
-            env, q, hp.test_episodes * 4, run_episode, num_tests=10
+            env, q, hp.test_episodes * 2, run_episode, num_tests=10
         )
 
         # Save data

@@ -9,8 +9,6 @@ import pettingzoo
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-from tqdm import tqdm
 
 from cmarl.runner import Hyperparameters, evaluate_model, run_model_train_test, run_experiment
 from cmarl.utils import compute_output_dim, reseed, TeamManager, is_model_found, today, load_model, save_model, \
@@ -197,8 +195,8 @@ if __name__ == '__main__':
         buffer_limit=9000,
         log_interval=20,
         max_episodes=max_episodes,
-        max_epsilon=0.1,
-        min_epsilon=0.0,
+        max_epsilon=0.9,
+        min_epsilon=0.1,
         test_episodes=5,
         warm_up_steps=3000,
         update_iter=20,
@@ -226,7 +224,7 @@ if __name__ == '__main__':
             print("Pretrained Model loaded. Test score: ", test_score)
 
         # Train and test
-        train_scores, test_scores = run_model_train_test(
+        train_scores, test_scores, losses = run_model_train_test(
             env, test_env, IqdnQNet, q, q_target,
             save_name, team_manager, hp, train, run_episode
         )
@@ -234,6 +232,7 @@ if __name__ == '__main__':
         # Save data
         save_data(np.array(train_scores), f'{save_name}-train_scores')
         save_data(np.array(test_scores), f'{save_name}-test_scores')
+        save_data(np.array(losses), f'{save_name}-losses')
     elif task == 'experiment':
         if loaded_model is None or not is_model_found(loaded_model):
             raise ValueError("Please provide a model to load for experiment.")
@@ -242,7 +241,7 @@ if __name__ == '__main__':
 
         # Run experiment
         rate_avg_scores, rate_scores = run_experiment(
-            env, q, hp.test_episodes * 4, run_episode, num_tests=10
+            env, q, hp.test_episodes * 2, run_episode, num_tests=10
         )
 
         # Save data
