@@ -37,7 +37,7 @@ class IqdnQNet(nn.Module):
         self.n_act = action_space.n  # action space size of agents
 
         stride1, stride2 = 1, 1
-        padding1, padding2 = 0, 0
+        padding1, padding2 = 1, 1
         kernel_size1, kernel_size2 = 3, 3
         pool_kernel_size, pool_stride = 2, 2
 
@@ -121,6 +121,10 @@ def run_episode(env: pettingzoo.ParallelEnv, q: IqdnQNet, memory: Optional[Repla
         observations, agent_rewards, agent_terminations, agent_truncations, agent_infos = env.step(agent_actions)
         score += sum(team_manager.get_info_of_team(my_team, agent_rewards, 0).values())
 
+        # Special rewards for tiger_deer_v4
+        if env.metadata['name'] == 'tiger_deer_v4':
+            score -= sum(team_manager.get_info_of_team('deer', agent_rewards, 0).values())
+
         if memory is not None:
             memory.put((
                 list(my_team_observations.values()),
@@ -193,7 +197,7 @@ if __name__ == '__main__':
         gamma=0.99,
         batch_size=batch_size,
         buffer_limit=9000,
-        log_interval=20,
+        log_interval=10,
         max_episodes=max_episodes,
         max_epsilon=0.9,
         min_epsilon=0.1,
