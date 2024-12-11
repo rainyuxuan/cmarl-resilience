@@ -113,3 +113,16 @@ class TeamManager:
         else:
             self.random_agents = random.sample(self.agents, len(self.agents))
             return self.get_random_agents(rate)
+
+    @staticmethod
+    def merge_terminates_truncates(terminates: dict[str, bool], truncates: dict[str, bool]) -> dict[str, bool]:
+        """
+        Merge terminates and truncates into one dictionary.
+        :param terminates: a dictionary with agent names as keys and boolean values as values
+        :param truncates: a dictionary with agent names as keys and boolean values as values
+        :return: a dictionary with agent names as keys and boolean values as values
+        """
+        result = {}
+        for agent in terminates:
+            result[agent] = terminates[agent] or truncates[agent]
+        return result

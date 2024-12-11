@@ -24,7 +24,7 @@ class ReplayBuffer:
         [batch_size, chunk_size, n_agents],
         [batch_size, chunk_size, n_agents],
         [batch_size, chunk_size, n_agents, ...obs_shape],
-        [batch_size, chunk_size, 1]
+        [batch_size, chunk_size, n_agents]
         """
         start_idx = np.random.randint(0, len(self.buffer) - chunk_size, batch_size)
         s_lst, a_lst, r_lst, s_prime_lst, done_lst = [], [], [], [], []
@@ -44,7 +44,7 @@ class ReplayBuffer:
         a_lst = np.array(a_lst).reshape(batch_size, chunk_size, num_agents)
         r_lst = np.array(r_lst).reshape(batch_size, chunk_size, num_agents)
         s_prime_lst = np.array(s_prime_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape)
-        done_lst = np.array(done_lst).reshape(batch_size, chunk_size, 1)
+        done_lst = np.array(done_lst).reshape(batch_size, chunk_size, num_agents)
         return (
             torch.tensor(s_lst, dtype=torch.float32),
             torch.tensor(a_lst, dtype=torch.float32),

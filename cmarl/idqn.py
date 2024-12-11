@@ -1,5 +1,4 @@
 import argparse
-import collections
 import random
 from dataclasses import dataclass
 from typing import Optional
@@ -11,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from cmarl.runner import Hyperparameters, evaluate_model, run_model_train_test, run_experiment
-from cmarl.utils import compute_output_dim, reseed, TeamManager, is_model_found, today, load_model, save_model, \
+from cmarl.utils import compute_output_dim, TeamManager, is_model_found, today, load_model, save_model, \
     save_data, save_dict
 from cmarl.utils.buffer import ReplayBuffer
 import gymnasium as gym
@@ -131,7 +130,9 @@ def run_episode(env: pettingzoo.ParallelEnv, q: IqdnQNet, memory: Optional[Repla
                 list(team_manager.get_info_of_team(my_team, agent_actions).values()),
                 list(team_manager.get_info_of_team(my_team, agent_rewards, 0).values()),
                 list(team_manager.get_info_of_team(my_team, observations).values()),
-                [int(team_manager.has_terminated_teams())]
+                list(team_manager.get_info_of_team(
+                    my_team,
+                    TeamManager.merge_terminates_truncates(agent_terminations, agent_truncations)).values())
             ))
 
         # Check for termination
@@ -158,7 +159,7 @@ def train(q, q_target, memory, optimizer, gamma, batch_size, update_iter=10, chu
         losses.append([])
 
         for agent_i in range(num_agents):
-            s, a, r, s_prime, done_mask = states[:, 0, agent_i], actions[:, 0, agent_i], rewards[:, 0, agent_i], next_states[:, 0, agent_i], dones
+            s, a, r, s_prime, done_mask = states[:, 0, agent_i], actions[:, 0, agent_i], rewards[:, 0, agent_i], next_states[:, 0, agent_i], dones[:, 0, agent_i]
             q_out = q(s)    # (batch_size, n_act)
             q_a = q_out.gather(1, a.long().unsqueeze(1)).squeeze(1) # (batch_size, 1) -> (batch_size)
             max_q_prime = q_target(s_prime).max(dim=1)[0]

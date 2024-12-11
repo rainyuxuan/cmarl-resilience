@@ -121,14 +121,35 @@ def train(q: VdnQNet, q_target: VdnQNet, memory: ReplayBuffer, optimizer: optim.
             max_q_prime, target_hidden = q_target(next_states[:, step_i], target_hidden.detach())
             max_q_prime = max_q_prime.max(dim=2)[0].squeeze(-1)  # [batch_size, num_agents]
             target_q = rewards[:, step_i, :].sum(dim=1, keepdims=True)  # [batch_size, 1]
-            target_q += gamma * max_q_prime.sum(dim=1, keepdims=True) * (1 - dones[:, step_i])
+            target_q += gamma * ((1 - dones[:, step_i]) * max_q_prime).sum(dim=1, keepdims=True)
 
             loss += F.smooth_l1_loss(sum_q, target_q.detach())
 
             # FIXME: may have error with dones
-            done_mask = dones[:, step_i].squeeze(-1).bool()
-            hidden[done_mask] = q.init_hidden(len(hidden[done_mask]))
-            target_hidden[done_mask] = q_target.init_hidden(len(target_hidden[done_mask]))
+            # Create a mask for each agent separately
+            done_mask = dones[:, step_i].bool()  # Shape: (batch_size, num_agents)
+
+            # Iterate over each agent
+            for agent_i in range(q.num_agents):
+                # Get the termination mask for this specific agent
+                agent_done_mask = done_mask[:, agent_i]  # Shape: (batch_size,)
+
+                # Number of terminated agents for this specific agent
+                num_terminated = agent_done_mask.sum().item()
+
+                if num_terminated > 0:  # Only process if there are terminated agents
+                    # Generate hidden states for terminated agents
+                    # Ensure `batch_size=num_terminated` for init_hidden
+                    new_hidden = q.init_hidden(batch_size=num_terminated)  # Shape: (num_terminated, num_agents, hx_size)
+                    new_target_hidden = q_target.init_hidden(batch_size=num_terminated)  # Same shape
+
+                    # Extract hidden states for this specific agent
+                    new_hidden_agent = new_hidden[:, agent_i, :]  # Shape: (num_terminated, hx_size)
+                    new_target_hidden_agent = new_target_hidden[:, agent_i, :]  # Shape: (num_terminated, hx_size)
+
+                    # Assign to hidden states only for the terminated agents of this specific agent
+                    hidden[agent_done_mask, agent_i, :] = new_hidden_agent  # (num_terminated, hx_size)
+                    target_hidden[agent_done_mask, agent_i, :] = new_target_hidden_agent  # (num_terminated, hx_size)
 
         losses.append(loss.item())
         optimizer.zero_grad()
@@ -201,7 +222,9 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
                 list(team_manager.get_info_of_team(my_team, agent_actions).values()),
                 list(team_manager.get_info_of_team(my_team, agent_rewards, 0).values()),
                 list(team_manager.get_info_of_team(my_team, observations).values()),
-                [int(team_manager.has_terminated_teams())]  # TODO: Update done mask for each agent
+                list(team_manager.get_info_of_team(
+                    my_team,
+                    TeamManager.merge_terminates_truncates(agent_terminations, agent_truncations)).values())
             ))
 
         # Check for termination
