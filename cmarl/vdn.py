@@ -310,7 +310,7 @@ if __name__ == '__main__':
 
         # Run experiment
         rate_avg_scores, rate_scores = run_experiment(
-            env, q, hp.test_episodes * 2, run_episode, num_tests=10
+            env, q, hp.test_episodes * 2, run_episode, num_tests=11     # 11 for tiger_deer, 17 for adversarial_pursuit
         )
 
         # Save data

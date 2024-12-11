@@ -3,8 +3,18 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 
-def plot_rewards_over_episodes(rewards: np.ndarray, title='Rewards', save_path: str=None):
-    plt.plot(rewards)
+def cubic_smooth(x, y):
+    f = interp1d(x, y, kind='cubic')
+    x_new = np.linspace(min(x), max(x), 100)
+    y_new = f(x_new)
+    return x_new, y_new
+
+def plot_rewards_over_episodes(rewards: np.ndarray, title='Rewards', save_path: str=None, episode_start=3, episode_end=160, step=1):
+    episodes = np.arange(episode_start, episode_end + 1, step)
+    # Smooth
+    x_new, y_new = cubic_smooth(episodes, rewards)
+    plt.plot(x_new, y_new)
+    # Metadata
     plt.title(title)
     plt.xlabel('Episodes')
     plt.ylabel('Rewards')
@@ -14,8 +24,11 @@ def plot_rewards_over_episodes(rewards: np.ndarray, title='Rewards', save_path: 
         plt.show()
 
 
-def plot_losses_over_episodes(losses: list[float], title='Losses', save_path: str=None):
-    plt.plot(losses)
+def plot_losses_over_episodes(losses: list[float], title='Losses', save_path: str=None, episode_start=3, episode_end=160, step=1):
+    episodes = np.arange(episode_start, episode_end + 1, step)
+    # Smooth
+    x_new, y_new = cubic_smooth(episodes, losses)
+    plt.plot(x_new, y_new)
     plt.title(title)
     plt.xlabel('Episodes')
     plt.ylabel('Losses')
@@ -44,14 +57,27 @@ def plot_scores_over_random_rates_with_variance(scores: dict[float, list[float]]
     # Plot scores std with error bars
     plt.errorbar(rates, avg_scores, yerr=std_scores, fmt='o')
     # Plot smooth line for average scores
-    x = np.linspace(min(rates), max(rates), 100)
-    f = interp1d(rates, avg_scores, kind='cubic')
-    plt.plot(x, f(x))
-
+    x_new, y_new = cubic_smooth(rates, avg_scores)
+    plt.plot(x_new, y_new)
     # Metadata
     plt.title(title)
     plt.xlabel('Random Rates')
     plt.ylabel('Average Scores')
+    if save_path:
+        plt.savefig(save_path)
+    else:
+        plt.show()
+
+def plot_variance_over_random_rates(scores: dict[float, list[float]], title='Score Variance over Random Rates', save_path: str=None):
+    rates = list(scores.keys())
+    std_scores = [np.std(scores[rate]) for rate in rates]
+    # Smooth
+    x_new, y_new = cubic_smooth(rates, std_scores)
+    plt.plot(x_new, y_new)
+    # Metadata
+    plt.title(title)
+    plt.xlabel('Random Rates')
+    plt.ylabel('Score Variance')
     if save_path:
         plt.savefig(save_path)
     else:
