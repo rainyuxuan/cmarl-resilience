@@ -104,7 +104,7 @@ def plot_stacked_rewards_over_episodes(rewards: dict[str, dict[str, any]], title
         episodes = np.arange(data['episode_start'], data['episode_end'] + 1, data['step'])
         # Smooth
         x_new, y_new = cubic_smooth(episodes, data['rewards'])
-        plt.plot(x_new, y_new, label=name, color=data['color'])
+        plt.plot(x_new, y_new, label=name, color=data['color'], linestyle=data.get('linestyle', '-'))
     # Metadata
     plt.title(title)
     plt.xlabel('Episodes')

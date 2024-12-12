@@ -31,5 +31,23 @@ envs_config = {
             "max_cycles": 1000,
             "tag_penalty": 0
         }
+    },
+    "adversarial_pursuit_big": {
+        "module": adversarial_pursuit_v4,
+        "args": {
+            "map_size": 55,
+            "render_mode": "human",
+            "max_cycles": 1000,
+            "tag_penalty": 0
+        }
+    },
+    "adversarial_pursuit_small": {
+        "module": adversarial_pursuit_v4,
+        "args": {
+            "map_size": 20,
+            "render_mode": "human",
+            "max_cycles": 1000,
+            "tag_penalty": 0
+        }
     }
 }
