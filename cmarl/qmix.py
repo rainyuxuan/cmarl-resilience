@@ -1,13 +1,10 @@
 import argparse
-import collections
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 import pettingzoo
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 
 from cmarl import vdn
@@ -20,7 +17,7 @@ from cmarl.utils.env import envs_config
 
 @dataclass
 class QmixHyperparameters(Hyperparameters):
-    pass
+    recurrent: bool = False
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -200,7 +197,8 @@ if __name__ == '__main__':
         warm_up_steps=3000,
         update_iter=20,
         chunk_size=1,
-        update_target_interval=20
+        update_target_interval=20,
+        recurrent=False,
     )
 
     # Create env
