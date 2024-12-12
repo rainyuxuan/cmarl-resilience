@@ -1,3 +1,4 @@
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -168,6 +169,8 @@ def run_model_train_test(
             test_scores.append(test_score)
             if test_score > prev_test_score:
                 save_model(model, save_name)
+                if mix_net is not None:
+                    save_model(mix_net, save_name + '-mix')
                 print(f"Model saved as {save_name} at episode: {episode_i}")
             print("Test score: ", test_score)
 

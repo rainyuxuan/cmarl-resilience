@@ -41,7 +41,10 @@ def plot_losses_over_episodes(losses: list[float], title='Losses', save_path: st
 def plot_avg_scores_over_random_rates(scores: dict[float, float], title='Scores over Random Rates', save_path: str=None):
     rates = list(scores.keys())
     avg_scores = list(scores.values())
-    plt.plot(rates, avg_scores)
+    # Smooth
+    x_new, y_new = cubic_smooth(rates, avg_scores)
+    plt.plot(x_new, y_new)
+    # Metadata
     plt.title(title)
     plt.xlabel('Random Rates')
     plt.ylabel('Average Scores')
@@ -78,6 +81,65 @@ def plot_variance_over_random_rates(scores: dict[float, list[float]], title='Sco
     plt.title(title)
     plt.xlabel('Random Rates')
     plt.ylabel('Score Variance')
+    if save_path:
+        plt.savefig(save_path)
+    else:
+        plt.show()
+
+def plot_stacked_rewards_over_episodes(rewards: dict[str, dict[str, any]], title='Rewards', save_path: str=None):
+    """
+
+    :param rewards: {name: {
+        'rewards': np.ndarray,
+        'color': str,
+        'episode_start': int,
+        'episode_end': int,
+        'step': int
+    }}
+    :param title:
+    :param save_path:
+    :return:
+    """
+    for name, data in rewards.items():
+        episodes = np.arange(data['episode_start'], data['episode_end'] + 1, data['step'])
+        # Smooth
+        x_new, y_new = cubic_smooth(episodes, data['rewards'])
+        plt.plot(x_new, y_new, label=name, color=data['color'])
+    # Metadata
+    plt.title(title)
+    plt.xlabel('Episodes')
+    plt.ylabel('Rewards')
+    plt.legend()
+    if save_path:
+        plt.savefig(save_path)
+    else:
+        plt.show()
+
+def plot_stacked_scores_over_random_rates(scores: dict[str, dict[str, any]], title='Rewards', save_path: str=None):
+    """
+
+    :param scores: {name: {
+        'scores': {rate: list[scores]},
+        'color': str,
+    }}
+    :param title:
+    :param save_path:
+    :return:
+    """
+    for name, data in scores.items():
+        rates = list(data['scores'].keys())
+        avg_scores = [np.mean(data['scores'][rate]) for rate in rates]
+        std_scores = [np.std(data['scores'][rate]) for rate in rates]
+        # Plot scores std with error bars
+        plt.errorbar(rates, avg_scores, yerr=std_scores, fmt='o', label=name, color=data['color'])
+        # Plot smooth line for average scores
+        x_new, y_new = cubic_smooth(rates, avg_scores)
+        plt.plot(x_new, y_new, color=data['color'])
+    # Metadata
+    plt.title(title)
+    plt.xlabel('Random Rates')
+    plt.ylabel('Average Scores')
+    plt.legend()
     if save_path:
         plt.savefig(save_path)
     else:

@@ -222,6 +222,8 @@ if __name__ == '__main__':
         # Load model if exists
         if loaded_model is not None and is_model_found(loaded_model):
             q = load_model(q, loaded_model)
+            if is_model_found(loaded_model+'-mix'):
+                mix_net = load_model(mix_net, loaded_model+'-mix')
             test_score = evaluate_model(test_env, hp.test_episodes, q, run_episode)
             print("Pretrained Model loaded. Test score: ", test_score)
 
@@ -244,7 +246,7 @@ if __name__ == '__main__':
 
         # Run experiment
         rate_avg_scores, rate_scores = run_experiment(
-            env, q, hp.test_episodes * 2, run_episode, num_tests=11  # 11 for tiger_deer, 17 for adversarial_pursuit
+            env, q, hp.test_episodes * 2, run_episode, num_tests=10 if args.env == 'tiger_deer' else 16  # 11 for tiger_deer, 17 for adversarial_pursuit
         )
 
         # Save data

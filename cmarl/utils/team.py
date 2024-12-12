@@ -106,12 +106,12 @@ class TeamManager:
         :param rate: the rate of random agents to return
         :return: a list of random agents with the length of rate * num_agents
         """
-        num_agents = len(self.agents)
+        num_agents = len(self.get_my_agents())
         if self.random_agents is not None:
             num_random_agents = int(num_agents * rate)
             return self.random_agents[:num_random_agents]
         else:
-            self.random_agents = random.sample(self.agents, len(self.agents))
+            self.random_agents = random.sample(self.get_my_agents(), num_agents)
             return self.get_random_agents(rate)
 
     @staticmethod

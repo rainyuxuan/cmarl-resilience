@@ -246,7 +246,7 @@ if __name__ == '__main__':
 
         # Run experiment
         rate_avg_scores, rate_scores = run_experiment(
-            env, q, hp.test_episodes * 2, run_episode, num_tests=10
+            env, q, hp.test_episodes * 2, run_episode, num_tests=10 if args.env == 'tiger_deer' else 16
         )
 
         # Save data

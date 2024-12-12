@@ -1,4 +1,5 @@
 import argparse
+import time
 from typing import Optional
 
 from dataclasses import dataclass
@@ -234,7 +235,10 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
         for agent, done in agent_truncations.items():
             if done:
                 team_manager.terminate_agent(agent)
-    print('Score:', score)
+
+        # Sleep for .5 seconds for visualization
+        # time.sleep(0.05)
+    print('Score:', score, 'num_random_agents:', len(team_manager.get_random_agents(random_rate)))
     return score
 
 
@@ -246,6 +250,7 @@ if __name__ == '__main__':
     parser.add_argument('--env', type=str, default='adversarial_pursuit', required=False)
     parser.add_argument('--load_model', type=str, default=None, required=False)
     parser.add_argument('--task', type=str, default='train', required=False, choices=['train', 'experiment'])
+    parser.add_argument('--name_suffix', type=str, default='', required=False)
 
     # Process arguments
     args = parser.parse_args()
@@ -253,7 +258,7 @@ if __name__ == '__main__':
     max_episodes = args.max_episodes
     batch_size = args.batch
     task = args.task
-    save_name = f'vdn-{args.env}-{today}'
+    save_name = f'vdn-{args.env}-{today}{"-" + args.name_suffix if args.name_suffix else ""}'
     loaded_model = args.load_model
 
     # Hyperparameters
@@ -310,7 +315,7 @@ if __name__ == '__main__':
 
         # Run experiment
         rate_avg_scores, rate_scores = run_experiment(
-            env, q, hp.test_episodes * 2, run_episode, num_tests=11     # 11 for tiger_deer, 17 for adversarial_pursuit
+            env, q, hp.test_episodes * 2, run_episode, num_tests=10 if args.env == 'tiger_deer' else 16    # 10 for tiger_deer, 16 for adversarial_pursuit
         )
 
         # Save data
