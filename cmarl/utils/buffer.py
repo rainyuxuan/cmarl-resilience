@@ -40,11 +40,12 @@ class ReplayBuffer:
                 done_lst.append(done)
         num_agents = len(s_lst[0])
         obs_shape = s_lst[0][0].shape
+
         s_lst = np.array(s_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape)
         a_lst = np.array(a_lst).reshape(batch_size, chunk_size, num_agents)
         r_lst = np.array(r_lst).reshape(batch_size, chunk_size, num_agents)
         s_prime_lst = np.array(s_prime_lst).reshape(batch_size, chunk_size, num_agents, *obs_shape)
-        done_lst = np.array(done_lst).reshape(batch_size, chunk_size, num_agents)
+        done_lst = np.array(done_lst, dtype=bool).reshape(batch_size, chunk_size, num_agents)
         return (
             torch.tensor(s_lst, dtype=torch.float32),
             torch.tensor(a_lst, dtype=torch.float32),

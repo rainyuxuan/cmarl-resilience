@@ -117,7 +117,7 @@ def train(q: VdnQNet, q_target: VdnQNet, memory: ReplayBuffer, optimizer: optim.
             out: tuple[torch.Tensor, torch.Tensor] = q(states[:, step_i], hidden)  # [batch_size, num_agents, n_actions]
             q_out, hidden = out
             q_a = q_out.gather(2, actions[:, step_i, :].unsqueeze(-1).long()).squeeze(-1)   # [batch_size, num_agents]: q values of actions taken
-            sum_q = q_a.sum(dim=1, keepdims=True)   # [batch_size, 1]
+            sum_q = (q_a * (1-dones[:, step_i])).sum(dim=1, keepdims=True)   # [batch_size, 1]
 
             max_q_prime, target_hidden = q_target(next_states[:, step_i], target_hidden.detach())
             max_q_prime = max_q_prime.max(dim=2)[0].squeeze(-1)  # [batch_size, num_agents]
@@ -175,6 +175,7 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
 
     while not team_manager.has_terminated_teams():
         my_team_observations = team_manager.get_info_of_team(my_team, observations)
+        # Fill rows with zeros for terminated agents
         for agent in team_manager.get_my_agents():
             if agent not in my_team_observations or my_team_observations[agent] is None:
                 my_team_observations[agent] = np.zeros(q.n_obs, dtype=np.float32)
@@ -184,13 +185,7 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
         agent_actions: dict[str, Optional[int]] = {}  # {agent: action}
         for team in teams:
             if team == my_team:
-                # TODO: Fill rows with zeros for terminated agents
-                team_observations = torch.tensor(np.array([
-                    my_team_observations[agent]
-                    if agent in my_team_observations and my_team_observations[agent] is not None
-                    else np.zeros(q.n_obs, dtype=np.float32)
-                    for agent in team_manager.get_team_agents(team)
-                ])).unsqueeze(0)    # [batch_size=1, num_agents, n_obs]
+                team_observations = torch.tensor(np.array(list(my_team_observations.values()))).unsqueeze(0)    # [batch_size=1, num_agents, n_obs]
                 actions, team_hiddens = q.sample_action(team_observations, hidden, epsilon)
                 team_actions = {
                     agent: action
@@ -230,11 +225,17 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
             else np.zeros(q.n_obs, dtype=np.float32)
             for agent in team_manager.get_my_agents()
         ]
+        my_team_actions = [
+            agent_actions[agent]
+            if agent in agent_actions and agent_actions[agent] is not None
+            else 0
+            for agent in team_manager.get_my_agents()
+        ]
 
         if memory is not None:
             memory.put((
                 list(my_team_observations.values()),
-                list(team_manager.get_info_of_team(my_team, agent_actions, None).values()),
+                my_team_actions,
                 list(team_manager.get_info_of_team(my_team, agent_rewards, 0).values()),
                 next_observations,
                 list(team_manager.get_info_of_team(

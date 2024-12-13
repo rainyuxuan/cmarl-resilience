@@ -14,11 +14,11 @@ envs_config = {
     "battle": {
         "module": battle_v4,
         "args": {
-            "map_size": 45,
+            "map_size": 35,
             "render_mode": "human",
             "max_cycles": 1000,
             "step_reward": -0.005,
-            "attack_penalty": -0.1,
+            "attack_penalty": -0.05,
             "dead_penalty": -0.5,
             "attack_opponent_reward": 0.2,
         }
