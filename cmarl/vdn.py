@@ -174,23 +174,27 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
     score = 0.0
 
     while not team_manager.has_terminated_teams():
-        my_team_observations = team_manager.get_info_of_team(my_team, observations)
         # Fill rows with zeros for terminated agents
-        for agent in team_manager.get_my_agents():
-            if agent not in my_team_observations or my_team_observations[agent] is None:
-                my_team_observations[agent] = np.zeros(q.n_obs, dtype=np.float32)
+        for agent in team_manager.agents:
+            if agent not in observations or observations[agent] is None:
+                observations[agent] = np.zeros(q.n_obs, dtype=np.float32)
                 team_manager.terminate_agent(agent)
+        my_team_observations = team_manager.get_info_of_team(my_team, observations)
 
         # Get actions for each agent based on the team
         agent_actions: dict[str, Optional[int]] = {}  # {agent: action}
         for team in teams:
+            team_observations = team_manager.get_info_of_team(team, observations)
+
             if team == my_team:
-                team_observations = torch.tensor(np.array(list(my_team_observations.values()))).unsqueeze(0)    # [batch_size=1, num_agents, n_obs]
-                actions, team_hiddens = q.sample_action(team_observations, hidden, epsilon)
+                obs_tensor = torch.tensor(np.array(list(
+                    team_observations.values()
+                ))).unsqueeze(0)    # [batch_size=1, num_agents, n_obs]
+                actions, team_hiddens = q.sample_action(obs_tensor, hidden, epsilon)
                 team_actions = {
                     agent: action
                     for agent, action in zip(
-                        my_team_observations.keys(), actions.squeeze(0).data.numpy().tolist()
+                        team_observations.keys(), actions.squeeze(0).data.numpy().tolist()
                     )
                 }
 
@@ -218,21 +222,21 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
         if env.metadata['name'] == 'tiger_deer_v4':
             score -= sum(team_manager.get_info_of_team('deer', agent_rewards, 0).values())
 
-        # Fill rows with zeros for terminated agents
-        next_observations = [
-            observations[agent]
-            if agent in observations and observations[agent] is not None
-            else np.zeros(q.n_obs, dtype=np.float32)
-            for agent in team_manager.get_my_agents()
-        ]
-        my_team_actions = [
-            agent_actions[agent]
-            if agent in agent_actions and agent_actions[agent] is not None
-            else 0
-            for agent in team_manager.get_my_agents()
-        ]
-
         if memory is not None:
+            # Fill rows with zeros for terminated agents
+            next_observations = [
+                observations[agent]
+                if agent in observations and observations[agent] is not None
+                else np.zeros(q.n_obs, dtype=np.float32)
+                for agent in team_manager.get_my_agents()
+            ]
+            my_team_actions = [
+                agent_actions[agent]
+                if agent in agent_actions and agent_actions[agent] is not None
+                else 0
+                for agent in team_manager.get_my_agents()
+            ]
+
             memory.put((
                 list(my_team_observations.values()),
                 my_team_actions,
@@ -250,6 +254,10 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
         for agent, done in agent_truncations.items():
             if done:
                 team_manager.terminate_agent(agent)
+
+        # Break if the other team has less than 3 agents
+        if len(team_manager.get_other_team_remains()) <= 3:
+            break
 
         # Sleep for .5 seconds for visualization
         # time.sleep(0.05)

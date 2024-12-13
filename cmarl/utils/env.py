@@ -19,8 +19,8 @@ envs_config = {
             "max_cycles": 1000,
             "step_reward": -0.005,
             "attack_penalty": -0.05,
-            "dead_penalty": -0.5,
-            "attack_opponent_reward": 0.2,
+            "dead_penalty": -3,
+            "attack_opponent_reward": 1,
         }
     },
     "adversarial_pursuit": {

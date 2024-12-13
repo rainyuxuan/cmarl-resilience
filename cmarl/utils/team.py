@@ -103,6 +103,16 @@ class TeamManager:
     def get_my_terminated_agents(self) -> list[str]:
         return list(self.terminated_agents.intersection(self.get_my_agents()))
 
+    def get_other_team_remains(self) -> list[str]:
+        """
+        Get the remaining agents in the other team.
+        :return:
+        """
+        my_team = self.get_my_team()
+        other_team = [team for team in self.teams if team != my_team][0]
+        return [agent for agent in self.get_team_agents(other_team) if agent not in self.terminated_agents]
+
+
     def get_random_agents(self, rate: float):
         """
         Create a random agent list, and return the first n agents.
