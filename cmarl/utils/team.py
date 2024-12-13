@@ -100,6 +100,9 @@ class TeamManager:
                 return True
         return False
 
+    def get_my_terminated_agents(self) -> list[str]:
+        return list(self.terminated_agents.intersection(self.get_my_agents()))
+
     def get_random_agents(self, rate: float):
         """
         Create a random agent list, and return the first n agents.

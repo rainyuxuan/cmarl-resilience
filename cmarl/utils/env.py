@@ -18,7 +18,7 @@ envs_config = {
             "render_mode": "human",
             "max_cycles": 1000,
             "step_reward": -0.005,
-            "attack_penalty": -0.01,
+            "attack_penalty": -0.1,
             "dead_penalty": -0.5,
             "attack_opponent_reward": 0.2,
         }

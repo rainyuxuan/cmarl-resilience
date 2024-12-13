@@ -175,6 +175,11 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
 
     while not team_manager.has_terminated_teams():
         my_team_observations = team_manager.get_info_of_team(my_team, observations)
+        for agent in team_manager.get_my_agents():
+            if agent not in my_team_observations or my_team_observations[agent] is None:
+                my_team_observations[agent] = np.zeros(q.n_obs, dtype=np.float32)
+                team_manager.terminate_agent(agent)
+
         # Get actions for each agent based on the team
         agent_actions: dict[str, Optional[int]] = {}  # {agent: action}
         for team in teams:
@@ -182,9 +187,10 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
                 # TODO: Fill rows with zeros for terminated agents
                 team_observations = torch.tensor(np.array([
                     my_team_observations[agent]
+                    if agent in my_team_observations and my_team_observations[agent] is not None
+                    else np.zeros(q.n_obs, dtype=np.float32)
                     for agent in team_manager.get_team_agents(team)
                 ])).unsqueeze(0)    # [batch_size=1, num_agents, n_obs]
-                # TODO: team_hidden = team_manager.get_info_of_team(team, hidden)
                 actions, team_hiddens = q.sample_action(team_observations, hidden, epsilon)
                 team_actions = {
                     agent: action
@@ -217,12 +223,20 @@ def run_episode(env: pettingzoo.ParallelEnv, q: VdnQNet, memory: Optional[Replay
         if env.metadata['name'] == 'tiger_deer_v4':
             score -= sum(team_manager.get_info_of_team('deer', agent_rewards, 0).values())
 
+        # Fill rows with zeros for terminated agents
+        next_observations = [
+            observations[agent]
+            if agent in observations and observations[agent] is not None
+            else np.zeros(q.n_obs, dtype=np.float32)
+            for agent in team_manager.get_my_agents()
+        ]
+
         if memory is not None:
             memory.put((
                 list(my_team_observations.values()),
-                list(team_manager.get_info_of_team(my_team, agent_actions).values()),
+                list(team_manager.get_info_of_team(my_team, agent_actions, None).values()),
                 list(team_manager.get_info_of_team(my_team, agent_rewards, 0).values()),
-                list(team_manager.get_info_of_team(my_team, observations).values()),
+                next_observations,
                 list(team_manager.get_info_of_team(
                     my_team,
                     TeamManager.merge_terminates_truncates(agent_terminations, agent_truncations)).values())
