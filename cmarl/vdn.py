@@ -316,7 +316,7 @@ if __name__ == '__main__':
         # Run experiment
         num_tests = len(team_manager.get_my_agents()) + 1
         rate_avg_scores, rate_scores = run_experiment(
-            env, q, hp.test_episodes * 2, run_episode, num_tests=num_tests    # 10 for tiger_deer, 16 for adversarial_pursuit
+            env, q, hp.test_episodes * 2, run_episode, num_tests=num_tests
         )
 
         # Save data
