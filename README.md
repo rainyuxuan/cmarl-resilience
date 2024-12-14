@@ -1,4 +1,4 @@
-# Resilience of Cooperative Multi-Agent Reinforcement Learning
+# Resilience in Cooperation: The Effects of Anomalous Agents in Multi-Agent Reinforcement Learning Systems
 
 ## Setup
 
@@ -8,21 +8,6 @@
 conda create -n cmarl python=3.9
 conda activate cmarl
 pip install -r requirements.txt
-```
-
-### Install MARLlib
-
-```bash
-git clone https://github.com/Replicable-MARL/MARLlib.git
-cd MARLlib
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# we recommend the gym version between 0.20.0~0.22.0.
-pip install gym>=0.20.0,<0.22.0
-
-# add patch files to MARLlib
-python patch/add_patch.py -y
 ```
 
 ### Reset Conda Environment
@@ -40,5 +25,14 @@ conda remove --name cmarl --all
   author={Zheng, Lianmin and Yang, Jiacheng and Cai, Han and Zhou, Ming and Zhang, Weinan and Wang, Jun and Yu, Yong},
   booktitle={Thirty-Second AAAI Conference on Artificial Intelligence},
   year={2018}
+}
+
+@misc{minimal-marl,
+    author = {Anurag Koul},
+    title = {minimal-marl},
+    year = {2021},
+    publisher = {GitHub},
+    note = {GitHub repository},
+    howpublished={\url{https://github.com/koulanurag/minimal-marl}}
 }
 ```
