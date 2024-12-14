@@ -67,10 +67,11 @@ class VdnQNet(nn.Module):
         """
         # TODO: need to have a done_mask param
         batch_size = obs.shape[0]
+        num_agents = obs.shape[1]
         q_values = torch.empty((batch_size, self.num_agents, self.n_act))
         next_hidden = torch.empty((batch_size, self.num_agents, self.hx_size))
 
-        for i, agent_i in enumerate(self.agents):
+        for i in range(num_agents):
             agent_obs = obs[:, i].permute(0, 3, 1, 2)   # [batch_size, *n_obs] -> [batch_size, channels, height, width]
             x = self.feature_cnn(agent_obs) # [batch_size, *n_obs] -> [batch_size, hx_size]
             if self.recurrent:
